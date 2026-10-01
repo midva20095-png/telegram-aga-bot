@@ -491,5 +491,3 @@ async function startBot() {
     await bot.launch();
     console.log('🤖 Ядро бота успешно запущено!');
 }
-
-module.exports = { startBot, addUserBalance, getUserBalance };
