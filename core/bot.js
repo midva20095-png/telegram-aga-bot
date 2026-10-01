@@ -100,19 +100,17 @@ async function createYookassaPayment(userId, pkgKey) {
     const pkg = CREDIT_PACKAGES[pkgKey];
     if (!pkg) throw new Error('Неверный пакет');
 
-    // Автоматическая поддержка обоих вариантов именования (с 'O' и с 'U')
-    const shopId = process.env.YOOKASSA_SHOP_ID || process.env.YUKASSA_SHOP_ID || '1120841';
-    const secretKey = process.env.YOOKASSA_SECRET_KEY || process.env.YUKASSA_SECRET_KEY;
+    const shopId = process.env.YUKASSA_SHOP_ID || process.env.YOOKASSA_SHOP_ID || '1120841';
+    const secretKey = process.env.YUKASSA_SECRET_KEY || process.env.YOOKASSA_SECRET_KEY;
 
     if (!secretKey) {
-        throw new Error('Не найден YOOKASSA_SECRET_KEY / YUKASSA_SECRET_KEY в перемененных окружения Render');
+        throw new Error('Не найден YOOKASSA_SECRET_KEY / YUKASSA_SECRET_KEY в Environment Variables на Render');
     }
 
     const idempotencyKey = `pay_${userId}_${pkgKey}_${Date.now()}`;
 
     console.log(`📤 Создание платежа в ЮKassa: Shop ID=${shopId}, User=${userId}, Сумма=${pkg.price}₽`);
 
-    // Тело запроса с чеком 54-ФЗ
     const requestBody = {
         amount: {
             value: `${pkg.price}.00`,
@@ -170,16 +168,15 @@ async function createYookassaPayment(userId, pkgKey) {
         }
         throw new Error('ЮKassa не вернула ссылку на оплату');
     } catch (err) {
-        // Если 400 из-за отсутствия потребности в чеке (фискализации), делаем повтор без receipt
-        if (err.response && err.response.status === 400 && err.response.data?.description?.includes('receipt')) {
-            console.log('⚠️ Повторный запрос в ЮKassa без блока receipt...');
+        if (err.response && err.response.status === 400) {
+            console.log('⚠️ Ошибка 400 при запросе с чеком. Повторная попытка без блока receipt...');
             delete requestBody.receipt;
             const retryResponse = await axios.post(
                 'https://api.yookassa.ru/v3/payments',
                 requestBody,
                 {
                     headers: {
-                        'Idempotency-Key': idempotencyKey + '_retry',
+                        'Idempotency-Key': idempotencyKey + '_noreceipt',
                         'Content-Type': 'application/json'
                     },
                     auth: {
@@ -218,6 +215,7 @@ function getModelSelectionKeyboard(currentMode) {
 }
 
 async function startBot() {
+    // 1. Сброс вебхука для стабильного Polling
     try {
         await bot.telegram.deleteWebhook({ drop_pending_updates: true });
         console.log('🧹 Старый вебхук сброшен, запущен Long Polling.');
@@ -248,6 +246,7 @@ async function startBot() {
 
     // --- ОБРАБОТЧИКИ КНОПОК НИЖНЕГО МЕНЮ ---
 
+    // Кнопка "💳 Мой баланс"
     bot.hears(['💳 Мой баланс', '💳 Баланс'], async (ctx) => {
         const balance = await getUserBalance(ctx.from.id);
         const currentMode = userActiveMode.get(ctx.from.id) || 'flash';
@@ -267,6 +266,7 @@ async function startBot() {
         );
     });
 
+    // Кнопка "🤖 Выбрать модель ИИ"
     bot.hears(['🤖 Выбрать модель ИИ', '🤖 Модели'], async (ctx) => {
         const currentMode = userActiveMode.get(ctx.from.id) || 'flash';
         await ctx.reply(
@@ -283,6 +283,7 @@ async function startBot() {
         );
     });
 
+    // Кнопка "💰 Пополнить баланс"
     bot.hears('💰 Пополнить баланс', async (ctx) => {
         const keyboard = Object.keys(CREDIT_PACKAGES).map(pkgKey => {
             const pkg = CREDIT_PACKAGES[pkgKey];
@@ -300,6 +301,7 @@ async function startBot() {
         );
     });
 
+    // Кнопка "ℹ️ Справка"
     bot.hears(['ℹ️ Справка', 'ℹ️ Помощь / Справка', 'ℹ Справка'], async (ctx) => {
         await ctx.reply(
             `ℹ️ *Как пользоваться ботом:*\n\n` +
@@ -313,12 +315,20 @@ async function startBot() {
 
     // --- INLINE ACTION HANDLERS ---
 
+    // Вызов инлайн-меню моделей
     bot.action('action_choose_ai', async (ctx) => {
         await ctx.answerCbQuery();
         const currentMode = userActiveMode.get(ctx.from.id) || 'flash';
-        await ctx.reply(`🤖 *Выберите ИИ-модель:*`, { parse_mode: 'Markdown', ...getModelSelectionKeyboard(currentMode) });
+        await ctx.reply(
+            `🤖 *Выберите ИИ-модель:*`,
+            {
+                parse_mode: 'Markdown',
+                ...getModelSelectionKeyboard(currentMode)
+            }
+        );
     });
 
+    // Переключение модели по клику
     bot.action(/^set_model_(.+)$/, async (ctx) => {
         const selectedModel = ctx.match[1];
         if (MODEL_NAMES[selectedModel]) {
@@ -334,6 +344,7 @@ async function startBot() {
         }
     });
 
+    // Показ пакетов оплаты
     bot.action('action_buy_credits', async (ctx) => {
         await ctx.answerCbQuery();
         const keyboard = Object.keys(CREDIT_PACKAGES).map(pkgKey => {
@@ -341,7 +352,13 @@ async function startBot() {
             return [Markup.button.callback(`💳 ${pkg.title} — ${pkg.price} ₽`, `buy_pkg_${pkgKey}`)];
         });
 
-        await ctx.reply(`💳 *Выберите пакет пополнения через ЮKassa:*`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(keyboard) });
+        await ctx.reply(
+            `💳 *Выберите пакет пополнения через ЮKassa:*`,
+            {
+                parse_mode: 'Markdown',
+                ...Markup.inlineKeyboard(keyboard)
+            }
+        );
     });
 
     // Генерация прямой ссылки на оплату через API ЮKassa
@@ -380,6 +397,7 @@ async function startBot() {
 
     // --- ЕДИНЫЙ ОБРАБОТЧИК ЗАПРОСОВ К ИИ (ТЕКСТ И МЕДИА) ---
     const handleAiRequest = async (ctx) => {
+        // Пропускаем клики по нижнему меню
         const text = ctx.message?.text || '';
         if (['🤖 Выбрать модель ИИ', '💳 Мой баланс', '💰 Пополнить баланс', 'ℹ️ Справка', '🤖 Модели', '💳 Баланс', 'ℹ️ Помощь / Справка', 'ℹ Справка'].includes(text)) {
             return;
@@ -391,6 +409,7 @@ async function startBot() {
 
         console.log(`📩 Новая генерация от userId=${userId}. Модель: ${currentMode}, стоимость: ${cost}`);
 
+        // 1. Проверяем баланс
         const balance = await getUserBalance(userId);
         if (balance < cost) {
             return ctx.reply(
@@ -418,12 +437,14 @@ async function startBot() {
             let fileBuffer = null;
             let mimeType = null;
 
+            // Обработка прикрепленного фото
             if (ctx.message?.photo && ctx.message.photo.length > 0) {
                 const largestPhoto = ctx.message.photo[ctx.message.photo.length - 1];
                 fileBuffer = await getTelegramFileBuffer(ctx, largestPhoto.file_id);
                 mimeType = 'image/jpeg';
             }
 
+            // Отправка в плагин ИИ
             const aiResult = await aiPlugin.processRequest({
                 prompt: prompt,
                 fileBuffer: fileBuffer,
@@ -431,11 +452,13 @@ async function startBot() {
                 modelKey: currentMode
             });
 
+            // 2. Списываем токены ТОЛЬКО после успешной генерации
             await deductUserBalance(userId, cost);
             const remainingBalance = await getUserBalance(userId);
 
             try { await ctx.deleteMessage(waitMessage.message_id); } catch(e){}
 
+            // Вывод результата
             if (aiResult.type === 'image' && aiResult.buffer) {
                 await ctx.replyWithPhoto(
                     { source: aiResult.buffer },
@@ -458,6 +481,7 @@ async function startBot() {
     bot.on('text', handleAiRequest);
     bot.on('photo', handleAiRequest);
 
+    // 3. Запуск бота
     await bot.launch();
     console.log('🤖 Ядро бота успешно запущено!');
 }
