@@ -39,7 +39,7 @@ const MODEL_NAMES = {
 
 // Пакеты пополнения
 const CREDIT_PACKAGES = {
-    'pack_50': { credits: 50, price: 100, title: '50 кредитов' },
+    'pack_50': { credits: 50, price: 1, title: '50 кредитов' },
     'pack_150': { credits: 150, price: 250, title: '150 кредитов' },
     'pack_500': { credits: 500, price: 700, title: '500 кредитов' }
 };
