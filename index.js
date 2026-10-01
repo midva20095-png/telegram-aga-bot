@@ -7,13 +7,13 @@ console.log('🚀 Запуск системы...');
 let app = null;
 
 try {
-    app = startWebApp();
+    app = startWebApp(); // 👈 Сохраняем запущенный сервер
 } catch (e) {
     console.error('⚠️ Ошибка запуска WebApp:', e.message);
 }
 
 try {
-    startBot(app);
+    startBot(app); // 👈 Передаём сервер в бота
 } catch (e) {
     console.error('⚠️ Ошибка запуска ядра бота:', e.message);
 }
