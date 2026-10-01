@@ -19,6 +19,11 @@ bot.use(async (ctx, next) => {
     return next();
 });
 
+// Глобальный перехватчик ошибок Telegraf (защищает процесс от падения при 409 Conflict)
+bot.catch((err, ctx) => {
+    console.error(`⚠️ Ошибка Telegraf [${ctx?.updateType}]:`, err.message || err);
+});
+
 // Стоимость моделей в токенах / кредитах
 const MODEL_COSTS = {
     'flash': 1,
@@ -100,7 +105,6 @@ async function createYookassaPayment(userId, pkgKey) {
     const pkg = CREDIT_PACKAGES[pkgKey];
     if (!pkg) throw new Error('Неверный пакет');
 
-    // Поддержка обеих вариаций переменных YUKASSA_ и YOOKASSA_
     const shopId = process.env.YUKASSA_SHOP_ID || process.env.YOOKASSA_SHOP_ID || '1120841';
     const secretKey = process.env.YUKASSA_SECRET_KEY || process.env.YOOKASSA_SECRET_KEY;
 
@@ -108,11 +112,13 @@ async function createYookassaPayment(userId, pkgKey) {
         throw new Error('Не найден YOOKASSA_SECRET_KEY / YUKASSA_SECRET_KEY в Environment Variables на Render');
     }
 
-    const idempotencyKey = `pay_${userId}_${pkgKey}_${Date.now()}`;
+    const timestamp = Date.now();
+    const baseIdempotencyKey = `pay_${userId}_${pkgKey}_${timestamp}`;
+    const basicAuth = Buffer.from(`${shopId}:${secretKey}`).toString('base64');
 
     console.log(`📤 Создание платежа в ЮKassa: Shop ID=${shopId}, User=${userId}, Сумма=${pkg.price}₽`);
 
-    const requestBody = {
+    const requestPayload = {
         amount: {
             value: `${pkg.price}.00`,
             currency: 'RUB'
@@ -148,50 +154,49 @@ async function createYookassaPayment(userId, pkgKey) {
         }
     };
 
+    // 1. Первая попытка — отправка с чеком 54-ФЗ
     try {
-        const response = await axios.post(
-            'https://api.yookassa.ru/v3/payments',
-            requestBody,
-            {
-                headers: {
-                    'Idempotency-Key': idempotencyKey,
-                    'Content-Type': 'application/json'
-                },
-                auth: {
-                    username: shopId,
-                    password: secretKey
-                }
+        const response = await axios({
+            method: 'post',
+            url: 'https://api.yookassa.ru/v3/payments',
+            data: requestPayload,
+            headers: {
+                'Authorization': `Basic ${basicAuth}`,
+                'Idempotency-Key': baseIdempotencyKey,
+                'Content-Type': 'application/json'
             }
-        );
+        });
 
-        if (response.data && response.data.confirmation && response.data.confirmation.confirmation_url) {
+        if (response.data?.confirmation?.confirmation_url) {
             return response.data.confirmation.confirmation_url;
         }
-        throw new Error('ЮKassa не вернула ссылку на оплату');
     } catch (err) {
+        // 2. Если ЮKassa возвращает 400 (например, если фискализация/чеки отключены в кабинете), повторяем без receipt
         if (err.response && err.response.status === 400) {
             console.log('⚠️ Ошибка 400 при запросе с чеком. Повторная попытка без блока receipt...');
-            delete requestBody.receipt;
-            const retryResponse = await axios.post(
-                'https://api.yookassa.ru/v3/payments',
-                requestBody,
-                {
-                    headers: {
-                        'Idempotency-Key': idempotencyKey + '_noreceipt',
-                        'Content-Type': 'application/json'
-                    },
-                    auth: {
-                        username: shopId,
-                        password: secretKey
-                    }
+            delete requestPayload.receipt;
+
+            const retryIdempotencyKey = `${baseIdempotencyKey}_noreceipt`;
+
+            const retryResponse = await axios({
+                method: 'post',
+                url: 'https://api.yookassa.ru/v3/payments',
+                data: requestPayload,
+                headers: {
+                    'Authorization': `Basic ${basicAuth}`,
+                    'Idempotency-Key': retryIdempotencyKey,
+                    'Content-Type': 'application/json'
                 }
-            );
-            if (retryResponse.data && retryResponse.data.confirmation && retryResponse.data.confirmation.confirmation_url) {
+            });
+
+            if (retryResponse.data?.confirmation?.confirmation_url) {
                 return retryResponse.data.confirmation.confirmation_url;
             }
         }
         throw err;
     }
+
+    throw new Error('ЮKassa не вернула ссылку на оплату');
 }
 
 // Вспомогательная функция скачивания медиа из Telegram
