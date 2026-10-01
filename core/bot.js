@@ -1,13 +1,14 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
+const express = require('express'); // 👈 Подключили Express для вебхуков ЮKassa
 
 let aiPlugin = null;
 try {
     aiPlugin = require('../ai_plugins/google_gemini_plugin');
     console.log('✅ Плагин Google Gemini успешно подключен к ядру');
 } catch (e) {
-    console.warn('⚠️ Внимание: Плагин ИИ не найден!', e.message);
+    console.warn('⚠️️ Внимание: Плагин ИИ не найден!', e.message);
 }
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -37,7 +38,7 @@ const MODEL_NAMES = {
     'nanobanana_pro': 'Nano Banana Pro (HQ) 💎'
 };
 
-// Пакеты пополнения
+// Пакеты пополнения (тестовый пакет на 1 рубль уже стоит здесь)
 const CREDIT_PACKAGES = {
     'pack_50': { credits: 50, price: 1, title: '50 кредитов' },
     'pack_150': { credits: 150, price: 250, title: '150 кредитов' },
@@ -74,9 +75,11 @@ async function deductUserBalance(userId, cost) {
 
 async function addUserBalance(userId, amount) {
     try {
+        console.log(`➕ Запрос на пополнение баланса в Google Таблице: userId=${userId}, amount=+${amount}`);
         const response = await axios.post(process.env.GOOGLE_SCRIPT_URL, {
             action: 'update', userId: userId, amount: amount
         });
+        console.log(`📥 Ответ от Google Таблицы при пополнении:`, response.data);
         return response.data && response.data.balance !== undefined;
     } catch (error) {
         console.error("❌ Ошибка начисления:", error.message);
@@ -205,7 +208,11 @@ async function startBot() {
 
     // Пополнение
     bot.hears('💰 Пополнить баланс', async (ctx) => {
-        ctx.emit('action_buy_credits_trigger', ctx);
+        const keyboard = Object.keys(CREDIT_PACKAGES).map(pkgKey => {
+            const pkg = CREDIT_PACKAGES[pkgKey];
+            return [Markup.button.callback(`💳 ${pkg.title} — ${pkg.price} ₽`, `buy_pkg_${pkgKey}`)];
+        });
+        await ctx.reply(`💳 *Выберите пакет пополнения:*`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(keyboard) });
     });
 
     bot.action('action_choose_ai', async (ctx) => {
@@ -273,12 +280,12 @@ async function startBot() {
 
             await ctx.reply(`⏳ Генерирую ссылку на оплату для ${text}...`);
 
-            // Создаем платеж через ЮKassa API с переданным email
+            // Создаем платеж через ЮKassa API с переданным email и метаданными
             const paymentUrl = await createYookassaPayment(
                 pkg.price, 
                 `Покупка ${pkg.title} в боте`, 
                 text, 
-                { userId: userId, credits: pkg.credits }
+                { userId: String(userId), credits: String(pkg.credits) }
             );
 
             if (paymentUrl) {
@@ -365,6 +372,60 @@ async function startBot() {
 
     await bot.launch();
     console.log('🤖 Ядро бота успешно запущено!');
+
+    // --- 🌐 НАСТРОЙКА EXPRESS СЕРВЕРА ДЛЯ ВЕБХУКОВ ЮKASSA ---
+    const app = express();
+    app.use(express.json());
+
+    app.post('/yookassa-webhook', async (req, res) => {
+        try {
+            const event = req.body;
+            console.log('🔔 Получен вебхук от ЮKassa:', JSON.stringify(event));
+
+            // Проверяем успешность платежа
+            if (event.event === 'payment.succeeded') {
+                const payment = event.object;
+                const metadata = payment.metadata; // Здесь лежат userId и credits
+
+                if (metadata && metadata.userId && metadata.credits) {
+                    const userId = parseInt(metadata.userId);
+                    const creditsToAdd = parseInt(metadata.credits);
+
+                    console.log(`🎉 Платёж подтвержден! Начисляем ${creditsToAdd} кредитов пользователю ${userId}`);
+
+                    // Начисляем баланс в Google Таблицу
+                    await addUserBalance(userId, creditsToAdd);
+
+                    // Отправляем уведомление пользователю в Telegram
+                    try {
+                        const newBalance = await getUserBalance(userId);
+                        await bot.telegram.sendMessage(
+                            userId,
+                            `🎉 *Оплата успешно получена!*\n\n` +
+                            `➕ Начислено: *${creditsToAdd} кредитов*\n` +
+                            `💳 Ваш текущий баланс: *${newBalance} кредитов*`,
+                            { parse_mode: 'Markdown' }
+                        );
+                        console.log(`✅ Уведомление успешно отправлено пользователю ${userId}`);
+                    } catch (err) {
+                        console.error('❌ Не удалось отправить сообщение в Telegram пользователю:', err.message);
+                    }
+                } else {
+                    console.warn('⚠️ Вебхук принят, но в metadata отсутствуют userId или credits');
+                }
+            }
+
+            res.status(200).send('OK');
+        } catch (error) {
+            console.error('❌ Ошибка при обработке вебхука ЮKassa:', error.message);
+            res.status(500).send('Internal Server Error');
+        }
+    });
+
+    const PORT = process.env.PORT || 10000;
+    app.listen(PORT, () => {
+        console.log(`🌐 Сервер вебхуков ЮKassa запущен и слушает порт ${PORT}`);
+    });
 }
 
 module.exports = { startBot };
