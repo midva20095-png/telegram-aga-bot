@@ -4,11 +4,11 @@ const path = require('path');
 function startWebApp() {
     const app = express();
 
-    // Обязательно для приема JSON-уведомлений от ЮKassa
+    // Парсер JSON для приёма уведомлений от ЮKassa
     app.use(express.json());
     app.use(express.urlencoded({ extended: true }));
 
-    // Статические файлы веб-приложения
+    // Обслуживание файлов мини-приложения
     app.use(express.static(path.join(__dirname, '../public')));
 
     const PORT = process.env.PORT || 10000;
@@ -16,7 +16,7 @@ function startWebApp() {
         console.log(`📱 Интерфейс и Мини-приложение запущены на порту ${PORT}`);
     });
 
-    return app;
+    return app; // 👈 Главное: отдаём сервер дальше
 }
 
 module.exports = { startWebApp };
