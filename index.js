@@ -4,14 +4,16 @@ const { startWebApp } = require('./ui_modules/webapp_server');
 
 console.log('🚀 Запуск системы...');
 
+let app = null;
+
 try {
-    startWebApp();
+    app = startWebApp();
 } catch (e) {
-    console.error('⚠ Ошибка запуска WebApp:', e.message);
+    console.error('⚠️ Ошибка запуска WebApp:', e.message);
 }
 
 try {
-    startBot();
+    startBot(app);
 } catch (e) {
-    console.error('❌ Ошибка запуска ядра бота:', e.message);
+    console.error('⚠️ Ошибка запуска ядра бота:', e.message);
 }
