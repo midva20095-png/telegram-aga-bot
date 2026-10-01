@@ -1,7 +1,7 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
-const express = require('express'); // 👈 Подключили Express для вебхуков ЮKassa
+const express = require('express');
 
 let aiPlugin = null;
 try {
@@ -38,7 +38,7 @@ const MODEL_NAMES = {
     'nanobanana_pro': 'Nano Banana Pro (HQ) 💎'
 };
 
-// Пакеты пополнения (тестовый пакет на 1 рубль уже стоит здесь)
+// Пакеты пополнения
 const CREDIT_PACKAGES = {
     'pack_50': { credits: 50, price: 1, title: '50 кредитов' },
     'pack_150': { credits: 150, price: 250, title: '150 кредитов' },
