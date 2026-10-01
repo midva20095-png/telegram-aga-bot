@@ -95,6 +95,58 @@ async function addUserBalance(userId, amount) {
     }
 }
 
+// Вспомогательная функция генерации ссылки на оплату через API ЮKassa
+async function createYookassaPayment(userId, pkgKey) {
+    const pkg = CREDIT_PACKAGES[pkgKey];
+    if (!pkg) throw new Error('Неверный пакет');
+
+    const shopId = process.env.YOOKASSA_SHOP_ID || '1120841';
+    const secretKey = process.env.YOOKASSA_SECRET_KEY;
+
+    if (!secretKey) {
+        throw new Error('Не задан YOOKASSA_SECRET_KEY в Environment Variables на Render');
+    }
+
+    const idempotencyKey = `pay_${userId}_${pkgKey}_${Date.now()}`;
+
+    console.log(`📤 Создание платежа в ЮKassa: ID магазина=${shopId}, Пользователь=${userId}, Сумма=${pkg.price}₽`);
+
+    const response = await axios.post(
+        'https://api.yookassa.ru/v3/payments',
+        {
+            amount: {
+                value: `${pkg.price}.00`,
+                currency: 'RUB'
+            },
+            capture: true,
+            confirmation: {
+                type: 'redirect',
+                return_url: 'https://t.me/'
+            },
+            description: `Пополнение ${pkg.credits} кредитов (ID: ${userId})`,
+            metadata: {
+                userId: String(userId),
+                credits: String(pkg.credits)
+            }
+        },
+        {
+            headers: {
+                'Idempotency-Key': idempotencyKey,
+                'Content-Type': 'application/json'
+            },
+            auth: {
+                username: shopId,
+                password: secretKey
+            }
+        }
+    );
+
+    if (response.data && response.data.confirmation && response.data.confirmation.confirmation_url) {
+        return response.data.confirmation.confirmation_url;
+    }
+    throw new Error('ЮKassa не вернула ссылку на оплату');
+}
+
 // Вспомогательная функция скачивания медиа из Telegram
 async function getTelegramFileBuffer(ctx, fileId) {
     try {
@@ -187,32 +239,23 @@ async function startBot() {
 
     // Кнопка "💰 Пополнить баланс"
     bot.hears('💰 Пополнить баланс', async (ctx) => {
-        const directPaymentUrl = process.env.YOOKASSA_PAYMENT_URL || process.env.PAYMENT_URL;
-
-        let replyMarkup;
-        if (directPaymentUrl) {
-            // Если в переменных зашита прямая ссылка на Магазин / ЮKassa
-            replyMarkup = Markup.inlineKeyboard([
-                [Markup.button.url('💳 Перейти к оплате в ЮKassa ↗️', directPaymentUrl)],
-                [Markup.button.callback('💳 Оплата картой (Telegram Invoice)', 'action_buy_credits')]
-            ]);
-        } else {
-            replyMarkup = Markup.inlineKeyboard([
-                [Markup.button.callback('💳 Выбрать пакет кредитов', 'action_buy_credits')]
-            ]);
-        }
+        const keyboard = Object.keys(CREDIT_PACKAGES).map(pkgKey => {
+            const pkg = CREDIT_PACKAGES[pkgKey];
+            return [Markup.button.callback(`💳 ${pkg.title} — ${pkg.price} ₽`, `buy_pkg_${pkgKey}`)];
+        });
 
         await ctx.reply(
             `💰 *Пополнение баланса (ЮKassa)*\n\n` +
-            `Вы можете перейти по прямой ссылке для оплаты в магазине ЮKassa или выбрать пакет кредитов прямо в боте:`,
+            `Магазин №: *1120841*\n` +
+            `Выберите желаемый пакет кредитов для оплаты:`,
             {
                 parse_mode: 'Markdown',
-                ...replyMarkup
+                ...Markup.inlineKeyboard(keyboard)
             }
         );
     });
 
-    // Кнопка "ℹ️ Справка"
+    // Кнопка "ℹ️️ Справка"
     bot.hears(['ℹ️ Справка', 'ℹ️ Помощь / Справка'], async (ctx) => {
         await ctx.reply(
             `ℹ️ *Как пользоваться ботом:*\n\n` +
@@ -258,16 +301,10 @@ async function startBot() {
     // Показ пакетов оплаты
     bot.action('action_buy_credits', async (ctx) => {
         await ctx.answerCbQuery();
-        const directPaymentUrl = process.env.YOOKASSA_PAYMENT_URL || process.env.PAYMENT_URL;
-
         const keyboard = Object.keys(CREDIT_PACKAGES).map(pkgKey => {
             const pkg = CREDIT_PACKAGES[pkgKey];
             return [Markup.button.callback(`💳 ${pkg.title} — ${pkg.price} ₽`, `buy_pkg_${pkgKey}`)];
         });
-
-        if (directPaymentUrl) {
-            keyboard.unshift([Markup.button.url('🔗 Прямая ссылка на ЮKassa', directPaymentUrl)]);
-        }
 
         await ctx.reply(
             `💳 *Выберите пакет пополнения через ЮKassa:*`,
@@ -278,7 +315,7 @@ async function startBot() {
         );
     });
 
-    // Генерация счёта Telegram Invoice через токен ЮKassa
+    // Генерация прямой ссылки на оплату через API ЮKassa
     bot.action(/^buy_pkg_(.+)$/, async (ctx) => {
         const pkgKey = ctx.match[1];
         const pkg = CREDIT_PACKAGES[pkgKey];
@@ -287,30 +324,31 @@ async function startBot() {
             return ctx.answerCbQuery('⚠️ Пакет не найден');
         }
 
-        const providerToken = process.env.PAYMENT_TOKEN || process.env.YOOKASSA_PROVIDER_TOKEN || process.env.YOOKASSA_TOKEN;
+        await ctx.answerCbQuery('⏳ Формируем ссылку на оплату...');
 
-        if (!providerToken) {
-            await ctx.answerCbQuery();
-            const directUrl = process.env.YOOKASSA_PAYMENT_URL || process.env.PAYMENT_URL;
-            if (directUrl) {
-                return ctx.reply(`⚠️ Прямая ссылка на оплату ЮKassa: [Перейти к оплате](${directUrl})`, { parse_mode: 'Markdown' });
-            }
-            return ctx.reply('⚠️ В `.env` не найден токен оплаты `PAYMENT_TOKEN` или прямая ссылка `YOOKASSA_PAYMENT_URL`.');
+        try {
+            // Запрос платежа напрямую через API ЮKassa
+            const paymentUrl = await createYookassaPayment(ctx.from.id, pkgKey);
+
+            await ctx.reply(
+                `💳 *Счёт на оплату сформирован!*\n\n` +
+                `• Товар: *${pkg.title}*\n` +
+                `• Сумма к оплате: *${pkg.price} ₽*\n\n` +
+                `Нажмите на кнопку ниже, чтобы перейти к защищенной оплате на сайте ЮKassa:`,
+                {
+                    parse_mode: 'Markdown',
+                    ...Markup.inlineKeyboard([
+                        [Markup.button.url(`💳 Оплатить ${pkg.price} ₽ в ЮKassa ↗️`, paymentUrl)]
+                    ])
+                }
+            );
+        } catch (error) {
+            console.error('❌ Ошибка формирования платежа ЮKassa:', error.message);
+            await ctx.reply(`⚠️ Не удалось сформировать ссылку на оплату: ${error.message}\nПроверьте, указан ли \`YOOKASSA_SECRET_KEY\` в настройках Render.`);
         }
-
-        await ctx.answerCbQuery();
-        await ctx.replyWithInvoice({
-            title: `Пополнение: ${pkg.title}`,
-            description: `Начисление ${pkg.credits} кредитов на ваш баланс`,
-            payload: JSON.stringify({ userId: ctx.from.id, credits: pkg.credits, pkgKey: pkgKey }),
-            provider_token: providerToken,
-            currency: 'RUB',
-            prices: [{ label: pkg.title, amount: pkg.price * 100 }],
-            start_parameter: `pay_${pkgKey}_${ctx.from.id}`
-        });
     });
 
-    // Подтверждение платежа ЮKassa
+    // Подтверждение платежа (если используется Telegram Invoice)
     bot.on('pre_checkout_query', async (ctx) => {
         try {
             await ctx.answerPreCheckoutQuery(true);
@@ -319,7 +357,7 @@ async function startBot() {
         }
     });
 
-    // Авто-начисление баланса после успешной оплаты
+    // Авто-начисление баланса при платежах через Telegram Invoice
     bot.on('successful_payment', async (ctx) => {
         try {
             const paymentInfo = ctx.message.successful_payment;
@@ -433,4 +471,4 @@ async function startBot() {
     console.log('🤖 Ядро бота успешно запущено!');
 }
 
-module.exports = { startBot };
+module.exports = { startBot, addUserBalance, getUserBalance };
