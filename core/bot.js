@@ -8,7 +8,7 @@ try {
     aiPlugin = require('../ai_plugins/google_gemini_plugin');
     console.log('✅ Плагин Google Gemini успешно подключен к ядру');
 } catch (e) {
-    console.warn('⚠️️ Внимание: Плагин ИИ не найден!', e.message);
+    console.warn('⚠️ Внимание: Плагин ИИ не найден!', e.message);
 }
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -251,7 +251,6 @@ async function startBot() {
         if (!pkg) return ctx.answerCbQuery('⚠️ Пакет не найден');
 
         await ctx.answerCbQuery();
-        // Сохраняем во временное состояние, какой пакет выбрал пользователь
         userAwaitingEmail.set(ctx.from.id, pkgKey);
 
         await ctx.reply(
@@ -266,21 +265,18 @@ async function startBot() {
         const text = ctx.message.text.trim();
         const userId = ctx.from.id;
 
-        // Проверяем, ожидает ли бот от этого пользователя email для покупки
         if (userAwaitingEmail.has(userId)) {
-            // Простейшая проверка на валидность email
             const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
             if (!emailRegex.test(text)) {
                 return ctx.reply('⚠️ Кажется, это не похоже на email. Пожалуйста, введите корректный адрес электронной почты (например, `example@mail.ru`):', { parse_mode: 'Markdown' });
             }
 
             const pkgKey = userAwaitingEmail.get(userId);
-            userAwaitingEmail.delete(userId); // Сбрасываем стейт ожидания
+            userAwaitingEmail.delete(userId);
             const pkg = CREDIT_PACKAGES[pkgKey];
 
             await ctx.reply(`⏳ Генерирую ссылку на оплату для ${text}...`);
 
-            // Создаем платеж через ЮKassa API с переданным email и метаданными
             const paymentUrl = await createYookassaPayment(
                 pkg.price, 
                 `Покупка ${pkg.title} в боте`, 
@@ -305,7 +301,6 @@ async function startBot() {
             }
         }
 
-        // Если это не ввод email, передаем управление дальше (в ИИ-обработчик или меню)
         return next();
     });
 
@@ -382,10 +377,9 @@ async function startBot() {
             const event = req.body;
             console.log('🔔 Получен вебхук от ЮKassa:', JSON.stringify(event));
 
-            // Проверяем успешность платежа
             if (event.event === 'payment.succeeded') {
                 const payment = event.object;
-                const metadata = payment.metadata; // Здесь лежат userId и credits
+                const metadata = payment.metadata;
 
                 if (metadata && metadata.userId && metadata.credits) {
                     const userId = parseInt(metadata.userId);
@@ -393,10 +387,8 @@ async function startBot() {
 
                     console.log(`🎉 Платёж подтвержден! Начисляем ${creditsToAdd} кредитов пользователю ${userId}`);
 
-                    // Начисляем баланс в Google Таблицу
                     await addUserBalance(userId, creditsToAdd);
 
-                    // Отправляем уведомление пользователю в Telegram
                     try {
                         const newBalance = await getUserBalance(userId);
                         await bot.telegram.sendMessage(
