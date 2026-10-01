@@ -306,7 +306,7 @@ async function startBot(app) {
             );
         }
 
-        if (!aiPlugin) return ctx.reply('⚠️ Плагин ИИ временно недоступен.');
+        if (!aiPlugin) return ctx.reply('⚠️️ Плагин ИИ временно недоступен.');
 
         const waitMessage = await ctx.reply(`⏳ *Генерирую ответ...*`, { parse_mode: 'Markdown' });
 
