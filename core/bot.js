@@ -100,6 +100,7 @@ async function createYookassaPayment(userId, pkgKey) {
     const pkg = CREDIT_PACKAGES[pkgKey];
     if (!pkg) throw new Error('Неверный пакет');
 
+    // Поддержка обеих вариаций переменных YUKASSA_ и YOOKASSA_
     const shopId = process.env.YUKASSA_SHOP_ID || process.env.YOOKASSA_SHOP_ID || '1120841';
     const secretKey = process.env.YUKASSA_SECRET_KEY || process.env.YOOKASSA_SECRET_KEY;
 
