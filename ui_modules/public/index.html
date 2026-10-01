@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Личный кабинет</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; background: #0f172a; color: #fff; padding: 20px; text-align: center; }
+        .card { background: #1e293b; padding: 20px; border-radius: 12px; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        button { background: #3b82f6; color: white; border: none; padding: 12px 20px; border-radius: 8px; font-size: 16px; cursor: pointer; width: 100%; margin-top: 10px; }
+        button:active { background: #2563eb; }
+        select { width: 100%; padding: 10px; border-radius: 8px; background: #334155; color: white; border: none; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Личный кабинет 📱</h1>
+    
+    <div class="card">
+        <h3>Ваш баланс</h3>
+        <p style="font-size: 24px; font-weight: bold; color: #10b981;">1,500 кредитов</p>
+        <button onclick="buyTokens()">💳 Пополнить баланс</button>
+    </div>
+
+    <div class="card">
+        <h3>Выбор нейросети</h3>
+        <select id="aiModel" onchange="saveModel()">
+            <option value="gemini">Google Gemini 2.5 Flash</option>
+            <option value="other">Другая модель (Скоро)</option>
+        </select>
+    </div>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.expand();
+
+        function buyTokens() {
+            alert("Здесь будет переход на оплату ЮKassa");
+        }
+
+        function saveModel() {
+            const selected = document.getElementById('aiModel').value;
+            tg.sendData(JSON.stringify({ action: "set_model", model: selected }));
+        }
+    </script>
+</body>
+</html>
