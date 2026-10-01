@@ -19,7 +19,7 @@ bot.use(async (ctx, next) => {
     return next();
 });
 
-// Глобальный перехватчик ошибок Telegraf (защищает процесс от падения при 409 Conflict)
+// Глобальный перехватчик ошибок Telegraf (защита от падения при 409 Conflict)
 bot.catch((err, ctx) => {
     console.error(`⚠️ Ошибка Telegraf [${ctx?.updateType}]:`, err.message || err);
 });
@@ -35,7 +35,7 @@ const MODEL_COSTS = {
 
 // Полный перечень моделей для платного API-ключа Google
 const MODEL_NAMES = {
-    'flash': 'Gemini 3.8 Flash ⚡️️',
+    'flash': 'Gemini 3.8 Flash ⚡️',
     'flash_25': 'Gemini 2.5 Flash 🚀',
     'pro': 'Gemini 2.5 Pro 🧠',
     'nanobanana': 'Nano Banana 2 (Картинки) 🎨',
@@ -100,7 +100,7 @@ async function addUserBalance(userId, amount) {
     }
 }
 
-// Вспомогательная функция генерации ссылки на оплату через API ЮKassa
+// --- ФУНКЦИИ ЮKASSA (REST API) ---
 async function createYookassaPayment(userId, pkgKey) {
     const pkg = CREDIT_PACKAGES[pkgKey];
     if (!pkg) throw new Error('Неверный пакет');
@@ -109,7 +109,7 @@ async function createYookassaPayment(userId, pkgKey) {
     const secretKey = process.env.YUKASSA_SECRET_KEY || process.env.YOOKASSA_SECRET_KEY;
 
     if (!secretKey) {
-        throw new Error('Не найден YOOKASSA_SECRET_KEY / YUKASSA_SECRET_KEY в Environment Variables на Render');
+        throw new Error('Не найден YUKASSA_SECRET_KEY / YOOKASSA_SECRET_KEY в Environment Variables');
     }
 
     const timestamp = Date.now();
@@ -146,7 +146,7 @@ async function createYookassaPayment(userId, pkgKey) {
                         value: `${pkg.price}.00`,
                         currency: 'RUB'
                     },
-                    vat_code: 1, // 1 = Без НДС
+                    vat_code: 1,
                     payment_mode: 'full_payment',
                     payment_subject: 'service'
                 }
@@ -154,7 +154,6 @@ async function createYookassaPayment(userId, pkgKey) {
         }
     };
 
-    // 1. Первая попытка — отправка с чеком 54-ФЗ
     try {
         const response = await axios({
             method: 'post',
@@ -168,15 +167,16 @@ async function createYookassaPayment(userId, pkgKey) {
         });
 
         if (response.data?.confirmation?.confirmation_url) {
-            return response.data.confirmation.confirmation_url;
+            return {
+                confirmationUrl: response.data.confirmation.confirmation_url,
+                paymentId: response.data.id
+            };
         }
     } catch (err) {
-        // 2. Если ЮKassa возвращает 400 (например, если фискализация/чеки отключены в кабинете), повторяем без receipt
         if (err.response && err.response.status === 400) {
             console.log('⚠️ Ошибка 400 при запросе с чеком. Повторная попытка без блока receipt...');
             delete requestPayload.receipt;
-
-            const retryIdempotencyKey = `${baseIdempotencyKey}_noreceipt`;
+            const retryKey = `${baseIdempotencyKey}_noreceipt`;
 
             const retryResponse = await axios({
                 method: 'post',
@@ -184,19 +184,37 @@ async function createYookassaPayment(userId, pkgKey) {
                 data: requestPayload,
                 headers: {
                     'Authorization': `Basic ${basicAuth}`,
-                    'Idempotency-Key': retryIdempotencyKey,
+                    'Idempotency-Key': retryKey,
                     'Content-Type': 'application/json'
                 }
             });
 
             if (retryResponse.data?.confirmation?.confirmation_url) {
-                return retryResponse.data.confirmation.confirmation_url;
+                return {
+                    confirmationUrl: retryResponse.data.confirmation.confirmation_url,
+                    paymentId: retryResponse.data.id
+                };
             }
         }
         throw err;
     }
-
     throw new Error('ЮKassa не вернула ссылку на оплату');
+}
+
+async function checkPaymentStatus(paymentId) {
+    const shopId = process.env.YUKASSA_SHOP_ID || process.env.YOOKASSA_SHOP_ID || '1120841';
+    const secretKey = process.env.YUKASSA_SECRET_KEY || process.env.YOOKASSA_SECRET_KEY;
+    const authString = Buffer.from(`${shopId}:${secretKey}`).toString('base64');
+
+    try {
+        const response = await axios.get(`https://api.yookassa.ru/v3/payments/${paymentId}`, {
+            headers: { 'Authorization': `Basic ${authString}` }
+        });
+        return response.data;
+    } catch (error) {
+        console.error('Ошибка проверки статуса платежа:', error.response?.data || error.message);
+        return null;
+    }
 }
 
 // Вспомогательная функция скачивания медиа из Telegram
@@ -319,7 +337,7 @@ async function startBot() {
     });
 
     // Кнопка "ℹ️ Справка"
-    bot.hears(['ℹ️️ Справка', 'ℹ️ Помощь / Справка'], async (ctx) => {
+    bot.hears(['ℹ️ Справка', 'ℹ️ Помощь / Справка', 'ℹ Справка'], async (ctx) => {
         await ctx.reply(
             `ℹ️ *Как пользоваться ботом:*\n\n` +
             `1. Выберите нужную ИИ-модель в меню "🤖 Выбрать модель ИИ".\n` +
@@ -384,7 +402,7 @@ async function startBot() {
         );
     });
 
-    // Генерация прямой ссылки на оплату через API ЮKassa по клику на пакет
+    // Генерация ссылки на оплату через API ЮKassa по клику на пакет (с кнопкой проверки)
     bot.action(/^buy_pkg_(.+)$/, async (ctx) => {
         const pkgKey = ctx.match[1];
         const pkg = CREDIT_PACKAGES[pkgKey];
@@ -396,17 +414,18 @@ async function startBot() {
         await ctx.answerCbQuery('⏳ Формируем ссылку на оплату...');
 
         try {
-            const paymentUrl = await createYookassaPayment(ctx.from.id, pkgKey);
+            const payment = await createYookassaPayment(ctx.from.id, pkgKey);
 
             await ctx.reply(
                 `💳 *Счёт на оплату сформирован!*\n\n` +
                 `• Товар: *${pkg.title}*\n` +
                 `• Сумма к оплате: *${pkg.price} ₽*\n\n` +
-                `Нажмите на кнопку ниже, чтобы перейти к защищенной оплате на сайте ЮKassa:`,
+                `Нажмите на кнопку ниже для перехода к оплате, а после завершения нажмите «🔄 Проверить оплату»:`,
                 {
                     parse_mode: 'Markdown',
                     ...Markup.inlineKeyboard([
-                        [Markup.button.url(`💳 Оплатить ${pkg.price} ₽ в ЮKassa ↗️`, paymentUrl)]
+                        [Markup.button.url(`💳 Оплатить ${pkg.price} ₽ в ЮKassa ↗️️`, payment.confirmationUrl)],
+                        [Markup.button.callback(`🔄 Проверить оплату`, `check_${payment.paymentId}`)]
                     ])
                 }
             );
@@ -418,43 +437,53 @@ async function startBot() {
         }
     });
 
-    // Подтверждение платежа ЮKassa (если используется Telegram Invoice)
-    bot.on('pre_checkout_query', async (ctx) => {
-        try {
-            await ctx.answerPreCheckoutQuery(true);
-        } catch (e) {
-            console.error('❌ PreCheckout error:', e.message);
+    // Проверка статуса платежа по кнопке
+    bot.action(/^check_(.+)$/, async (ctx) => {
+        const paymentId = ctx.match[1];
+        await ctx.answerCbQuery('Проверяем статус платежа...');
+
+        const paymentInfo = await checkPaymentStatus(paymentId);
+        if (!paymentInfo) {
+            return ctx.reply('❌ Не удалось связаться с ЮKassa. Попробуйте позже.');
         }
-    });
 
-    // Авто-начисление баланса после успешной оплаты
-    bot.on('successful_payment', async (ctx) => {
-        try {
-            const paymentInfo = ctx.message.successful_payment;
-            const payload = JSON.parse(paymentInfo.invoice_payload);
-            const creditsToAdd = payload.credits || 0;
+        if (paymentInfo.status === 'succeeded') {
+            const credits = parseInt(paymentInfo.metadata?.credits) || 0;
+            const amountPaid = paymentInfo.amount?.value || '';
 
-            if (creditsToAdd > 0) {
-                await addUserBalance(ctx.from.id, creditsToAdd);
-                const newBalance = await getUserBalance(ctx.from.id);
-                await ctx.reply(
-                    `🎉 *Оплата успешно проведена!*\n\n` +
-                    `➕ Начислено: *${creditsToAdd} кредитов*\n` +
-                    `💳 Текущий баланс в Google Таблице: *${newBalance} кредитов*`,
+            await addUserBalance(ctx.from.id, credits);
+            const newBalance = await getUserBalance(ctx.from.id);
+
+            try {
+                await ctx.editMessageText(
+                    `✅ *Платеж успешно подтвержден!*\n\n` +
+                    `💵 Сумма: ${amountPaid} руб.\n` +
+                    `🪙 Начислено кредитов: ${credits}\n` +
+                    `💰 Ваш новый баланс: ${newBalance} кредитов`,
                     { parse_mode: 'Markdown' }
                 );
+            } catch (e) {
+                // Игнорируем если текст сообщения не изменился
             }
-        } catch (error) {
-            console.error('❌ Ошибка при автоначислении:', error.message);
-            await ctx.reply('⚠️ Ошибка автоначисления. Обратитесь к администратору.');
+
+            return ctx.reply(
+                `🎉 Баланс успешно пополнен на *${credits} кредитов*!\n` +
+                `💳 Текущий баланс: *${newBalance} кредитов*`,
+                { parse_mode: 'Markdown' }
+            );
+        } else {
+            return ctx.reply(
+                `❌ Платеж еще не подтвержден (статус: *${paymentInfo.status}*).\n` +
+                `Если вы уже оплатили, подождите пару секунд и нажмите кнопку «🔄 Проверить оплату» снова.`,
+                { parse_mode: 'Markdown' }
+            );
         }
     });
 
     // --- ЕДИНЫЙ ОБРАБОТЧИК ЗАПРОСОВ К ИИ (ТЕКСТ И МЕДИА) ---
     const handleAiRequest = async (ctx) => {
-        // Пропускаем клики по нижнему меню
         const text = ctx.message?.text || '';
-        if (['🤖 Выбрать модель ИИ', '💳 Мой баланс', '💰 Пополнить баланс', 'ℹ️ Справка', '🤖 Модели', '💳 Баланс', 'ℹ️ Помощь / Справка'].includes(text)) {
+        if (['🤖 Выбрать модель ИИ', '💳 Мой баланс', '💰 Пополнить баланс', 'ℹ️ Справка', '🤖 Модели', '💳 Баланс', 'ℹ️️ Помощь / Справка', 'ℹ Справка'].includes(text)) {
             return;
         }
 
@@ -464,7 +493,6 @@ async function startBot() {
 
         console.log(`📩 Новая генерация от userId=${userId}. Модель: ${currentMode}, стоимость: ${cost}`);
 
-        // 1. Проверяем баланс
         const balance = await getUserBalance(userId);
         if (balance < cost) {
             return ctx.reply(
@@ -492,14 +520,12 @@ async function startBot() {
             let fileBuffer = null;
             let mimeType = null;
 
-            // Обработка прикрепленного фото
             if (ctx.message?.photo && ctx.message.photo.length > 0) {
                 const largestPhoto = ctx.message.photo[ctx.message.photo.length - 1];
                 fileBuffer = await getTelegramFileBuffer(ctx, largestPhoto.file_id);
                 mimeType = 'image/jpeg';
             }
 
-            // Отправка в плагин ИИ
             const aiResult = await aiPlugin.processRequest({
                 prompt: prompt,
                 fileBuffer: fileBuffer,
@@ -507,13 +533,11 @@ async function startBot() {
                 modelKey: currentMode
             });
 
-            // 2. Списываем токены ТОЛЬКО после успешной генерации
             await deductUserBalance(userId, cost);
             const remainingBalance = await getUserBalance(userId);
 
             try { await ctx.deleteMessage(waitMessage.message_id); } catch(e){}
 
-            // Вывод результата
             if (aiResult.type === 'image' && aiResult.buffer) {
                 await ctx.replyWithPhoto(
                     { source: aiResult.buffer },
@@ -529,14 +553,13 @@ async function startBot() {
         } catch (error) {
             console.error('❌ Ошибка генерации:', error);
             try { await ctx.deleteMessage(waitMessage.message_id); } catch(e){}
-            await ctx.reply(`⚠️️ Произошла ошибка: ${error.message}`);
+            await ctx.reply(`⚠️ Произошла ошибка: ${error.message}`);
         }
     };
 
     bot.on('text', handleAiRequest);
     bot.on('photo', handleAiRequest);
 
-    // 3. Запуск бота
     await bot.launch();
     console.log('🤖 Ядро бота успешно запущено!');
 }
