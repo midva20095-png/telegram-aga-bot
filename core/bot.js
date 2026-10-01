@@ -1,7 +1,6 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
-const express = require('express'); // 👈 Подключили Express для вебхуков ЮKassa
 
 let aiPlugin = null;
 try {
@@ -13,15 +12,13 @@ try {
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const userActiveMode = new Map();
-const userAwaitingEmail = new Map(); // Хранит выбранный пакет для пользователей, которые вводят email
+const userAwaitingEmail = new Map();
 
-// Отладочный логгер
 bot.use(async (ctx, next) => {
     console.log(`🔔 ПОЛУЧЕН ЗАПРОС: ID: ${ctx.from?.id}, Сообщение: ${ctx.message?.text || ctx.callbackQuery?.data || 'медиа/действие'}`);
     return next();
 });
 
-// Стоимость моделей
 const MODEL_COSTS = {
     'flash': 1,
     'flash_25': 1,
@@ -38,14 +35,12 @@ const MODEL_NAMES = {
     'nanobanana_pro': 'Nano Banana Pro (HQ) 💎'
 };
 
-// Пакеты пополнения (тестовый пакет на 1 рубль уже стоит здесь)
 const CREDIT_PACKAGES = {
     'pack_50': { credits: 50, price: 1, title: '50 кредитов' },
     'pack_150': { credits: 150, price: 250, title: '150 кредитов' },
     'pack_500': { credits: 500, price: 700, title: '500 кредитов' }
 };
 
-// --- ФИКСИРОВАННАЯ НИЖНЯЯ КЛАВИАТУРА МЕНЮ ---
 const mainKeyboard = Markup.keyboard([
     ['🤖 Выбрать модель ИИ', '💳 Мой баланс'],
     ['💰 Пополнить баланс', 'ℹ️ Справка']
@@ -105,7 +100,6 @@ function getModelSelectionKeyboard(currentMode) {
     return Markup.inlineKeyboard(buttons);
 }
 
-// Функция создания платежа через ЮKassa API с передачей Email для чека
 async function createYookassaPayment(amount, description, email, metadata) {
     try {
         const shopId = process.env.YOOKASSA_SHOP_ID;
@@ -129,9 +123,7 @@ async function createYookassaPayment(amount, description, email, metadata) {
             description: description,
             metadata: metadata,
             receipt: {
-                customer: {
-                    email: email
-                },
+                customer: { email: email },
                 items: [
                     {
                         description: description,
@@ -145,13 +137,8 @@ async function createYookassaPayment(amount, description, email, metadata) {
                 ]
             }
         }, {
-            auth: {
-                username: shopId,
-                password: secretKey
-            },
-            headers: {
-                'Idempotence-Key': `${Date.now()}-${Math.random()}`
-            }
+            auth: { username: shopId, password: secretKey },
+            headers: { 'Idempotence-Key': `${Date.now()}-${Math.random()}` }
         });
 
         return response.data.confirmation.confirmation_url;
@@ -161,7 +148,7 @@ async function createYookassaPayment(amount, description, email, metadata) {
     }
 }
 
-async function startBot() {
+async function startBot(app) {
     try {
         await bot.telegram.deleteWebhook({ drop_pending_updates: true });
         console.log('🧹 Старый вебхук сброшен, запущен Long Polling.');
@@ -185,7 +172,6 @@ async function startBot() {
         );
     });
 
-    // Кнопка баланса
     bot.hears(['💳 Мой баланс', '💳 Баланс'], async (ctx) => {
         const balance = await getUserBalance(ctx.from.id);
         const currentMode = userActiveMode.get(ctx.from.id) || 'flash';
@@ -200,13 +186,11 @@ async function startBot() {
         );
     });
 
-    // Выбор моделей
     bot.hears(['🤖 Выбрать модель ИИ', '🤖 Модели'], async (ctx) => {
         const currentMode = userActiveMode.get(ctx.from.id) || 'flash';
         await ctx.reply(`🤖 *Выберите модель:*`, { parse_mode: 'Markdown', ...getModelSelectionKeyboard(currentMode) });
     });
 
-    // Пополнение
     bot.hears('💰 Пополнить баланс', async (ctx) => {
         const keyboard = Object.keys(CREDIT_PACKAGES).map(pkgKey => {
             const pkg = CREDIT_PACKAGES[pkgKey];
@@ -230,7 +214,6 @@ async function startBot() {
         }
     });
 
-    // Показ пакетов при нажатии «Пополнить»
     const showPackages = async (ctx) => {
         const keyboard = Object.keys(CREDIT_PACKAGES).map(pkgKey => {
             const pkg = CREDIT_PACKAGES[pkgKey];
@@ -244,7 +227,6 @@ async function startBot() {
         await showPackages(ctx);
     });
 
-    // Шаг 1: Пользователь кликнул на пакет -> просим ввести Email для чека
     bot.action(/^buy_pkg_(.+)$/, async (ctx) => {
         const pkgKey = ctx.match[1];
         const pkg = CREDIT_PACKAGES[pkgKey];
@@ -260,7 +242,6 @@ async function startBot() {
         );
     });
 
-    // Шаг 2: Обработка введенного Email от пользователя
     bot.on('text', async (ctx, next) => {
         const text = ctx.message.text.trim();
         const userId = ctx.from.id;
@@ -304,7 +285,6 @@ async function startBot() {
         return next();
     });
 
-    // --- ЕДИНЫЙ ОБРАБОТЧИК ЗАПРОСОВ К ИИ ---
     const handleAiRequest = async (ctx) => {
         const text = ctx.message?.text || '';
         if (['🤖 Выбрать модель ИИ', '💳 Мой баланс', '💰 Пополнить баланс', 'ℹ️ Справка', '🤖 Модели', '💳 Баланс'].includes(text)) {
@@ -368,56 +348,51 @@ async function startBot() {
     await bot.launch();
     console.log('🤖 Ядро бота успешно запущено!');
 
-    // --- 🌐 НАСТРОЙКА EXPRESS СЕРВЕРА ДЛЯ ВЕБХУКОВ ЮKASSA ---
-    const app = express();
-    app.use(express.json());
+    // --- 🌐 НАСТРОЙКА ВЕБХУКА ЮKASSA ---
+    if (app) {
+        app.post('/yookassa-webhook', async (req, res) => {
+            try {
+                const event = req.body;
+                console.log('🔔 Получен вебхук от ЮKassa:', JSON.stringify(event));
 
-    app.post('/yookassa-webhook', async (req, res) => {
-        try {
-            const event = req.body;
-            console.log('🔔 Получен вебхук от ЮKassa:', JSON.stringify(event));
+                if (event.event === 'payment.succeeded') {
+                    const payment = event.object;
+                    const metadata = payment.metadata;
 
-            if (event.event === 'payment.succeeded') {
-                const payment = event.object;
-                const metadata = payment.metadata;
+                    if (metadata && metadata.userId && metadata.credits) {
+                        const userId = parseInt(metadata.userId);
+                        const creditsToAdd = parseInt(metadata.credits);
 
-                if (metadata && metadata.userId && metadata.credits) {
-                    const userId = parseInt(metadata.userId);
-                    const creditsToAdd = parseInt(metadata.credits);
+                        console.log(`🎉 Платёж подтвержден! Начисляем ${creditsToAdd} кредитов пользователю ${userId}`);
 
-                    console.log(`🎉 Платёж подтвержден! Начисляем ${creditsToAdd} кредитов пользователю ${userId}`);
+                        await addUserBalance(userId, creditsToAdd);
 
-                    await addUserBalance(userId, creditsToAdd);
-
-                    try {
-                        const newBalance = await getUserBalance(userId);
-                        await bot.telegram.sendMessage(
-                            userId,
-                            `🎉 *Оплата успешно получена!*\n\n` +
-                            `➕ Начислено: *${creditsToAdd} кредитов*\n` +
-                            `💳 Ваш текущий баланс: *${newBalance} кредитов*`,
-                            { parse_mode: 'Markdown' }
-                        );
-                        console.log(`✅ Уведомление успешно отправлено пользователю ${userId}`);
-                    } catch (err) {
-                        console.error('❌ Не удалось отправить сообщение в Telegram пользователю:', err.message);
+                        try {
+                            const newBalance = await getUserBalance(userId);
+                            await bot.telegram.sendMessage(
+                                userId,
+                                `🎉 *Оплата успешно получена!*\n\n` +
+                                `➕ Начислено: *${creditsToAdd} кредитов*\n` +
+                                `💳 Ваш текущий баланс: *${newBalance} кредитов*`,
+                                { parse_mode: 'Markdown' }
+                            );
+                            console.log(`✅ Уведомление успешно отправлено пользователю ${userId}`);
+                        } catch (err) {
+                            console.error('❌ Не удалось отправить сообщение в Telegram пользователю:', err.message);
+                        }
+                    } else {
+                        console.warn('⚠️ Вебхук принят, но в metadata отсутствуют userId или credits');
                     }
-                } else {
-                    console.warn('⚠️ Вебхук принят, но в metadata отсутствуют userId или credits');
                 }
+
+                res.status(200).send('OK');
+            } catch (error) {
+                console.error('❌ Ошибка при обработке вебхука ЮKassa:', error.message);
+                res.status(500).send('Internal Server Error');
             }
-
-            res.status(200).send('OK');
-        } catch (error) {
-            console.error('❌ Ошибка при обработке вебхука ЮKassa:', error.message);
-            res.status(500).send('Internal Server Error');
-        }
-    });
-
-    const PORT = process.env.PORT || 10000;
-    app.listen(PORT, () => {
-        console.log(`🌐 Сервер вебхуков ЮKassa запущен и слушает порт ${PORT}`);
-    });
+        });
+        console.log('🌐 Роут /yookassa-webhook успешно привязан к Express');
+    }
 }
 
 module.exports = { startBot };
