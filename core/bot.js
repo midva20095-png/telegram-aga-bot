@@ -14,6 +14,11 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const userActiveMode = new Map();
 const userAwaitingEmail = new Map();
 
+// Глобальный обработчик ошибок Telegram, чтобы сервер не падал при сбоях сети или 409
+bot.catch((err, ctx) => {
+    console.error(`⚠️ Ошибка в Telegraf для ${ctx?.updateType || 'неизвестного события'}:`, err.message);
+});
+
 bot.use(async (ctx, next) => {
     console.log(`🔔 ПОЛУЧЕН ЗАПРОС: ID: ${ctx.from?.id}, Сообщение: ${ctx.message?.text || ctx.callbackQuery?.data || 'медиа/действие'}`);
     return next();
@@ -43,7 +48,7 @@ const CREDIT_PACKAGES = {
 
 const mainKeyboard = Markup.keyboard([
     ['🤖 Выбрать модель ИИ', '💳 Мой баланс'],
-    ['💰 Пополнить баланс', 'ℹ️ Справка']
+    ['💰 Пополнить баланс', 'ℹ️️ Справка']
 ]).resize();
 
 async function getUserBalance(userId) {
@@ -156,7 +161,7 @@ async function startBot(app) {
         console.log('ℹ️ Вебхук:', e.message);
     }
 
-    // --- 🌐 СНАЧАЛА РЕГИСТРИРУЕМ ВЕБХУК ЮKASSA ---
+    // 🌐 РЕГИСТРАЦИЯ ВЕБХУКА ЮKASSA ДО ЗАПУСКА ПОЛЛИНГА
     if (app) {
         app.post('/yookassa-webhook', async (req, res) => {
             try {
@@ -333,7 +338,7 @@ async function startBot(app) {
 
     const handleAiRequest = async (ctx) => {
         const text = ctx.message?.text || '';
-        if (['🤖 Выбрать модель ИИ', '💳 Мой баланс', '💰 Пополнить баланс', 'ℹ️️ Справка', '🤖 Модели', '💳 Баланс'].includes(text)) {
+        if (['🤖 Выбрать модель ИИ', '💳 Мой баланс', '💰 Пополнить баланс', 'ℹ️ Справка', '🤖 Модели', '💳 Баланс'].includes(text)) {
             return;
         }
 
@@ -384,16 +389,19 @@ async function startBot(app) {
         } catch (error) {
             console.error('❌ Ошибка генерации:', error);
             try { await ctx.deleteMessage(waitMessage.message_id); } catch(e){}
-            await ctx.reply(`⚠️️ Произошла ошибка: ${error.message}`);
+            await ctx.reply(`⚠️ Произошла ошибка: ${error.message}`);
         }
     };
 
     bot.on('text', handleAiRequest);
     bot.on('photo', handleAiRequest);
 
-    // --- И ТОЛЬКО ТЕПЕРЬ ЗАПУСКАЕМ БОТА ---
-    bot.launch();
-    console.log('🤖 Ядро бота успешно запущено!');
+    // БЕЗОПАСНЫЙ ЗАПУСК БОТА: сбой в Telegram не ломает весь веб-сервер
+    bot.launch().then(() => {
+        console.log('🤖 Ядро бота успешно запущено!');
+    }).catch((err) => {
+        console.error('⚠️ Ошибка при запуске Telegram polling (бот перезапустится автоматически):', err.message);
+    });
 }
 
 module.exports = { startBot };
