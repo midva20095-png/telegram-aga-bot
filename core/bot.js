@@ -418,5 +418,4 @@ async function startBot(app) {
     });
 }
 
-// ИСПРАВЛЕНО: Вернули правильный экспорт, чтобы Node.js не выдавал ошибку "startBot is not a function"
-module.exports = startBot;
+module.exports = { startBot };
