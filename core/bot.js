@@ -48,7 +48,7 @@ const CREDIT_PACKAGES = {
 
 const mainKeyboard = Markup.keyboard([
     ['🤖 Выбрать модель ИИ', '💳 Мой баланс'],
-    ['💰 Пополнить баланс', 'ℹ️ Справка'] // Исправлен эмодзи
+    ['💰 Пополнить баланс', 'ℹ Справка']
 ]).resize();
 
 async function getUserBalance(userId) {
@@ -249,17 +249,6 @@ async function startBot(app) {
         });
         await ctx.reply(`💳 *Выберите пакет пополнения:*`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(keyboard) });
     });
-    
-    bot.hears('ℹ️ Справка', async (ctx) => {
-        await ctx.reply(
-            `ℹ️ *Как пользоваться ботом:*\n\n` +
-            `1. Выберите нужную модель ИИ в меню.\n` +
-            `2. Напишите любой запрос или отправьте картинку.\n` +
-            `3. За каждый запрос списываются кредиты.\n\n` +
-            `Если кредиты закончились, нажмите кнопку «💰 Пополнить баланс».`,
-            { parse_mode: 'Markdown' }
-        );
-    });
 
     bot.action('action_choose_ai', async (ctx) => {
         await ctx.answerCbQuery();
@@ -349,7 +338,6 @@ async function startBot(app) {
 
     const handleAiRequest = async (ctx) => {
         const text = ctx.message?.text || '';
-        
         if (['🤖 Выбрать модель ИИ', '💳 Мой баланс', '💰 Пополнить баланс', 'ℹ️ Справка', '🤖 Модели', '💳 Баланс'].includes(text)) {
             return;
         }
@@ -408,7 +396,7 @@ async function startBot(app) {
     bot.on('text', handleAiRequest);
     bot.on('photo', handleAiRequest);
 
-    // БЕЗОПАСНЫЙ ЗАПУСК БОТА
+    // БЕЗОПАСНЫЙ ЗАПУСК БОТА: сбой в Telegram не ломает весь веб-сервер
     bot.launch().then(() => {
         console.log('🤖 Ядро бота успешно запущено!');
     }).catch((err) => {
@@ -416,5 +404,4 @@ async function startBot(app) {
     });
 }
 
-// ИСПРАВЛЕННАЯ СТРОКА
 module.exports = { startBot };
