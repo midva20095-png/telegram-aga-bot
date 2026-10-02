@@ -48,7 +48,7 @@ const CREDIT_PACKAGES = {
 
 const mainKeyboard = Markup.keyboard([
     ['🤖 Выбрать модель ИИ', '💳 Мой баланс'],
-    ['💰 Пополнить баланс', 'ℹ️️ Справка']
+    ['💰 Пополнить баланс', 'ℹ Справка']
 ]).resize();
 
 async function getUserBalance(userId) {
