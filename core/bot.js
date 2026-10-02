@@ -7,7 +7,7 @@ try {
     aiPlugin = require('../ai_plugins/google_gemini_plugin');
     console.log('✅ Плагин Google Gemini успешно подключен к ядру');
 } catch (e) {
-    console.warn('⚠️ Внимание: Плагин ИИ не найден!', e.message);
+    console.warn('⚠️️ Внимание: Плагин ИИ не найден!', e.message);
 }
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -338,7 +338,9 @@ async function startBot(app) {
 
     const handleAiRequest = async (ctx) => {
         const text = ctx.message?.text || '';
-        if (['🤖 Выбрать модель ИИ', '💳 Мой баланс', '💰 Пополнить баланс', 'ℹ️ Справка', '🤖 Модели', '💳 Баланс'].includes(text)) {
+        
+        // Исправлено: тут теперь правильный эмодзи для "Справка"
+        if (['🤖 Выбрать модель ИИ', '💳 Мой баланс', '💰 Пополнить баланс', 'ℹ Справка', '🤖 Модели', '💳 Баланс'].includes(text)) {
             return;
         }
 
@@ -403,3 +405,5 @@ async function startBot(app) {
         console.error('⚠️ Ошибка при запуске Telegram polling (бот перезапустится автоматически):', err.message);
     });
 }
+
+module.exports = startBot;
