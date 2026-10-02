@@ -166,8 +166,8 @@ async function startBot(app) {
         app.post('/yookassa-webhook', async (req, res) => {
             try {
                 const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
-                const isYookassaIp = clientIp.includes('185.71.76.') || 
-                                     clientIp.includes('185.71.77.') || 
+                const isYookassaIp = clientIp.includes('185.71.76.') ||
+                                     clientIp.includes('185.71.77.') ||
                                      clientIp.includes('77.75.153.') ||
                                      clientIp.includes('77.75.154.') ||
                                      clientIp.includes('77.75.156.') ||
@@ -333,9 +333,9 @@ async function startBot(app) {
             await ctx.reply(`⏳ Генерирую ссылку на оплату для ${text}...`);
 
             const paymentUrl = await createYookassaPayment(
-                pkg.price, 
-                `Покупка ${pkg.title} в боте`, 
-                text, 
+                pkg.price,
+                `Покупка ${pkg.title} в боте`,
+                text,
                 { userId: String(userId), credits: String(pkg.credits) }
             );
 
@@ -361,7 +361,7 @@ async function startBot(app) {
 
     const handleAiRequest = async (ctx) => {
         const text = ctx.message?.text || '';
-        
+
         if (['🤖 Выбрать модель ИИ', '💳 Мой баланс', '💰 Пополнить баланс', 'ℹ Справка', 'ℹ️ Справка', '🤖 Модели', '💳 Баланс'].includes(text)) {
             return;
         }
