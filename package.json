@@ -1,17 +1,6 @@
-{
-  "name": "telegram-ai-bot",
-  "version": "1.0.0",
-  "description": "Modular Telegram Bot with AI and WebApp",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "dotenv": "^16.4.5",
-    "telegraf": "^4.16.3",
-    "express": "^4.19.2",
-    "@google/genai": "latest",
-    "axios": "^1.6.8",
-    "googleapis": "^134.0.0"
-  }
+"dependencies": {
+  "@supabase/supabase-js": "^2.39.8",
+  "dotenv": "^16.4.5",
+  "express": "^4.19.2",
+  "telegraf": "^4.16.3"
 }
