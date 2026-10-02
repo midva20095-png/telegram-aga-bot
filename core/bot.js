@@ -1,465 +1,371 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
+const { randomUUID } = require('crypto');
 
 let aiPlugin = null;
 try {
     aiPlugin = require('../ai_plugins/google_gemini_plugin');
     console.log('✅ Плагин Google Gemini успешно подключен к ядру');
-} catch (e) {
-    console.warn('⚠️ Внимание: Плагин ИИ не найден!', e.message);
+} catch (error) {
+    console.warn('⚠️ Плагин ИИ не найден:', error.message);
 }
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const userActiveMode = new Map();
 const userAwaitingEmail = new Map();
-const userProcessingLock = new Set(); // Защита от спама (Race Condition)
-
-// Глобальный обработчик ошибок Telegram
-bot.catch((err, ctx) => {
-    console.error(`⚠️ Ошибка в Telegraf для ${ctx?.updateType || 'неизвестного события'}:`, err.message);
-});
-
-bot.use(async (ctx, next) => {
-    console.log(`🔔 ПОЛУЧЕН ЗАПРОС: ID: ${ctx.from?.id}, Сообщение: ${ctx.message?.text || ctx.callbackQuery?.data || 'медиа/действие'}`);
-    return next();
-});
+const userProcessingLock = new Set();
+const paymentProcessingLock = new Set();
+const processedPayments = new Set();
+let handlersRegistered = false;
 
 const MODEL_COSTS = {
-    'flash': 1,
-    'flash_25': 1,
-    'pro': 3,
-    'nanobanana': 5,
-    'nanobanana_pro': 8
+    flash: 1, flash_25: 1, pro: 3, nanobanana: 5, nanobanana_pro: 8
 };
-
 const MODEL_NAMES = {
-    'flash': 'Gemini 3.8 Flash ⚡️',
-    'flash_25': 'Gemini 2.5 Flash 🚀',
-    'pro': 'Gemini 2.5 Pro 🧠',
-    'nanobanana': 'Nano Banana 2 (Картинки) 🎨',
-    'nanobanana_pro': 'Nano Banana Pro (HQ) 💎'
+    flash: 'Gemini 3.8 Flash ⚡️',
+    flash_25: 'Gemini 2.5 Flash 🚀',
+    pro: 'Gemini 2.5 Pro 🧠',
+    nanobanana: 'Nano Banana 2 (Картинки) 🎨',
+    nanobanana_pro: 'Nano Banana Pro (HQ) 💎'
 };
-
 const CREDIT_PACKAGES = {
-    'pack_50': { credits: 50, price: 250, title: '50 кредитов' },
-    'pack_150': { credits: 150, price: 750, title: '150 кредитов' },
-    'pack_500': { credits: 500, price: 2500, title: '500 кредитов' }
+    pack_50: { credits: 50, price: 250, title: '50 кредитов' },
+    pack_150: { credits: 150, price: 750, title: '150 кредитов' },
+    pack_500: { credits: 500, price: 2500, title: '500 кредитов' }
 };
-
+const MENU_TEXTS = new Set([
+    '🤖 Выбрать модель ИИ', '🤖 Модели', '💳 Мой баланс', '💳 Баланс',
+    '💰 Пополнить баланс', 'ℹ️ Справка', 'ℹ Справка'
+]);
 const mainKeyboard = Markup.keyboard([
     ['🤖 Выбрать модель ИИ', '💳 Мой баланс'],
     ['💰 Пополнить баланс', 'ℹ️ Справка']
 ]).resize();
 
+bot.catch((error, ctx) => {
+    console.error(`⚠️ Ошибка Telegraf (${ctx?.updateType || 'неизвестно'}):`, error.message);
+});
+bot.use(async (ctx, next) => {
+    const text = ctx.message?.text?.trim() || '';
+    const action = ctx.callbackQuery?.data || '';
+    if (ctx.from && (MENU_TEXTS.has(text) || /^\/(start|cancel)(?:@\w+)?(?:\s|$)/i.test(text) ||
+        action === 'action_choose_ai' || action === 'action_buy_credits' || action.startsWith('set_model_'))) {
+        userAwaitingEmail.delete(ctx.from.id);
+    }
+    return next();
+});
+
+function parseBalance(data) {
+    const value = data?.balance;
+    if ((typeof value !== 'number' && typeof value !== 'string') || String(value).trim() === '') {
+        throw new Error('Сервис баланса вернул некорректный ответ');
+    }
+    const balance = Number(value);
+    if (!Number.isSafeInteger(balance)) {
+        throw new Error('Сервис баланса вернул некорректный баланс');
+    }
+    return balance;
+}
 async function getUserBalance(userId) {
-    try {
-        const response = await axios.get(`${process.env.GOOGLE_SCRIPT_URL}?action=get&userId=${userId}`);
-        return response.data && response.data.balance !== undefined ? parseInt(response.data.balance) : 0;
-    } catch (error) {
-        console.error("❌ Ошибка чтения баланса:", error.message);
-        return 0;
-    }
-}
-
-async function deductUserBalance(userId, cost) {
-    try {
-        const response = await axios.post(process.env.GOOGLE_SCRIPT_URL, {
-            action: 'update', userId: userId, amount: -cost
-        });
-        return response.data && response.data.balance !== undefined;
-    } catch (error) {
-        console.error("❌ Ошибка списания:", error.message);
-        return false;
-    }
-}
-
-async function addUserBalance(userId, amount) {
-    try {
-        console.log(`➕ Запрос на пополнение баланса в Google Таблице: userId=${userId}, amount=+${amount}`);
-        const response = await axios.post(process.env.GOOGLE_SCRIPT_URL, {
-            action: 'update', userId: userId, amount: amount
-        });
-        console.log(`📥 Ответ от Google Таблицы при пополнении:`, response.data);
-        return response.data && response.data.balance !== undefined;
-    } catch (error) {
-        console.error("❌ Ошибка начисления:", error.message);
-        return false;
-    }
-}
-
-async function getTelegramFileBuffer(ctx, fileId) {
-    try {
-        const fileLink = await ctx.telegram.getFileLink(fileId);
-        const response = await axios.get(fileLink.href, { responseType: 'arraybuffer' });
-        return Buffer.from(response.data);
-    } catch (e) {
-        return null;
-    }
-}
-
-function getModelSelectionKeyboard(currentMode) {
-    const buttons = Object.keys(MODEL_NAMES).map(key => {
-        const isSelected = key === currentMode ? '✅ ' : '';
-        return [Markup.button.callback(`${isSelected}${MODEL_NAMES[key]} (${MODEL_COSTS[key]} кр.)`, `set_model_${key}`)];
+    const response = await axios.get(process.env.GOOGLE_SCRIPT_URL, {
+        params: { action: 'get', userId }, timeout: 20000
     });
-    return Markup.inlineKeyboard(buttons);
+    return parseBalance(response.data);
 }
-
+async function updateUserBalance(userId, amount) {
+    const response = await axios.post(process.env.GOOGLE_SCRIPT_URL, {
+        action: 'update', userId, amount
+    }, { timeout: 20000 });
+    return parseBalance(response.data);
+}
+async function getTelegramFileBuffer(ctx, fileId) {
+    const fileLink = await ctx.telegram.getFileLink(fileId);
+    const response = await axios.get(fileLink.href, {
+        responseType: 'arraybuffer', timeout: 60000
+    });
+    const buffer = Buffer.from(response.data);
+    if (!buffer.length) throw new Error('Не удалось загрузить фотографию');
+    return buffer;
+}
+function getModelSelectionKeyboard(currentMode) {
+    return Markup.inlineKeyboard(Object.keys(MODEL_NAMES).map(key => [
+        Markup.button.callback(
+            `${key === currentMode ? '✅ ' : ''}${MODEL_NAMES[key]} (${MODEL_COSTS[key]} кр.)`,
+            `set_model_${key}`
+        )
+    ]));
+}
+function splitText(text, limit = 4000) {
+    const parts = [];
+    let part = '';
+    for (const character of text) {
+        if (part.length + character.length > limit) {
+            parts.push(part);
+            part = '';
+        }
+        part += character;
+    }
+    if (part) parts.push(part);
+    return parts;
+}
+async function sendPlainText(ctx, text) {
+    for (const part of splitText(text)) await ctx.reply(part);
+}
+function validateAiResult(result) {
+    if (!result || typeof result !== 'object' || result.error || result.success === false ||
+        ['error', 'failed', 'failure'].includes(result.status) || result.type === 'error') {
+        throw new Error('ИИ не вернул успешный результат');
+    }
+    const text = typeof result.text === 'string' ? result.text : '';
+    if (result.type === 'image') {
+        if (!Buffer.isBuffer(result.buffer) || !result.buffer.length) {
+            throw new Error('ИИ не вернул изображение');
+        }
+    } else if (!text.trim()) {
+        throw new Error('ИИ вернул пустой ответ');
+    }
+    return { ...result, text };
+}
 async function createYookassaPayment(amount, description, email, metadata) {
     try {
         const shopId = process.env.YOOKASSA_SHOP_ID;
         const secretKey = process.env.YOOKASSA_SECRET_KEY;
-
         if (!shopId || !secretKey) {
             console.warn('⚠️ ЮKassa API ключи не настроены. Используется статический URL.');
             return process.env.YOOKASSA_PAYMENT_URL || null;
         }
-
         const response = await axios.post('https://api.yookassa.ru/v3/payments', {
-            amount: {
-                value: amount.toFixed(2),
-                currency: 'RUB'
-            },
+            amount: { value: amount.toFixed(2), currency: 'RUB' },
             confirmation: {
                 type: 'redirect',
                 return_url: process.env.YOOKASSA_RETURN_URL || 'https://t.me/'
             },
             capture: true,
-            description: description,
-            metadata: metadata,
+            description,
+            metadata,
             receipt: {
-                customer: { email: email },
-                items: [
-                    {
-                        description: description,
-                        quantity: '1.00',
-                        amount: {
-                            value: amount.toFixed(2),
-                            currency: 'RUB'
-                        },
-                        vat_code: Number(process.env.YOOKASSA_VAT_CODE || '1')
-                    }
-                ]
+                customer: { email },
+                items: [{
+                    description, quantity: '1.00',
+                    amount: { value: amount.toFixed(2), currency: 'RUB' },
+                    vat_code: Number(process.env.YOOKASSA_VAT_CODE || '1')
+                }]
             }
         }, {
             auth: { username: shopId, password: secretKey },
-            headers: { 'Idempotence-Key': `${Date.now()}-${Math.random()}` }
+            headers: { 'Idempotence-Key': randomUUID() },
+            timeout: 30000
         });
-
-        return response.data.confirmation.confirmation_url;
+        return response.data?.confirmation?.confirmation_url || null;
     } catch (error) {
-        console.error('❌ Ошибка создания платежа в ЮKassa API:', error.response?.data || error.message);
+        console.error('❌ Ошибка создания платежа:', error.response?.data || error.message);
         return null;
     }
 }
+async function showPackages(ctx) {
+    const keyboard = Object.entries(CREDIT_PACKAGES).map(([key, pkg]) => [
+        Markup.button.callback(`💳 ${pkg.title} — ${pkg.price} ₽`, `buy_pkg_${key}`)
+    ]);
+    await ctx.reply('💳 Выберите пакет пополнения:', Markup.inlineKeyboard(keyboard));
+}
 
 async function startBot(app) {
-    try {
-        await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-        console.log('🧹 Старый вебхук сброшен, запущен Long Polling.');
-    } catch (e) {
-        console.log('ℹ️️ Вебхук:', e.message);
-    }
+    if (handlersRegistered) return;
+    handlersRegistered = true;
 
     if (app) {
         app.post('/yookassa-webhook', async (req, res) => {
+            let paymentId = null;
+            let lockAcquired = false;
             try {
-                const rawIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
-                const clientIp = rawIp.split(',')[0].trim();
-                const isYookassaIp = clientIp.startsWith('185.71.76.') ||
-                                     clientIp.startsWith('185.71.77.') ||
-                                     clientIp.startsWith('77.75.153.') ||
-                                     clientIp.startsWith('77.75.154.') ||
-                                     clientIp.startsWith('77.75.156.') ||
-                                     clientIp.startsWith('2a02:5180:');
-
-                if (!isYookassaIp) {
-                    console.warn(`🚨 Попытка подделки платежа с неавторизованного IP: ${clientIp}`);
-                    return res.status(403).send('Forbidden');
+                if (req.body?.event !== 'payment.succeeded') return res.status(200).send('OK');
+                paymentId = req.body?.object?.id;
+                if (typeof paymentId !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(paymentId)) {
+                    return res.status(400).send('Invalid payment ID');
                 }
+                if (processedPayments.has(paymentId)) return res.status(200).send('OK');
+                if (paymentProcessingLock.has(paymentId)) return res.status(503).send('Retry later');
+                const shopId = process.env.YOOKASSA_SHOP_ID;
+                const secretKey = process.env.YOOKASSA_SECRET_KEY;
+                if (!shopId || !secretKey) return res.status(503).send('Payment verification unavailable');
+                paymentProcessingLock.add(paymentId);
+                lockAcquired = true;
 
-                const event = req.body;
-                console.log('🔔 Получен вебхук от ЮKassa:', JSON.stringify(event));
-
-                if (event.event === 'payment.succeeded') {
-                    const metadata = event.object?.metadata;
-
-                    if (metadata && metadata.userId && metadata.credits) {
-                        const userId = parseInt(metadata.userId);
-                        const creditsToAdd = parseInt(metadata.credits);
-
-                        console.log(`🎉 Платёж подтвержден! Начисляем ${creditsToAdd} кредитов пользователю ${userId}`);
-
-                        await addUserBalance(userId, creditsToAdd);
-
-                        try {
-                            const newBalance = await getUserBalance(userId);
-                            await bot.telegram.sendMessage(
-                                userId,
-                                `🎉 *Оплата успешно получена!*\n\n` +
-                                `➕ Начислено: *${creditsToAdd} кредитов*\n` +
-                                `💳 Ваш текущий баланс: *${newBalance} кредитов*`,
-                                { parse_mode: 'Markdown' }
-                            );
-                            console.log(`✅ Уведомление успешно отправлено пользователю ${userId}`);
-                        } catch (err) {
-                            console.error('❌ Не удалось отправить сообщение в Telegram пользователю:', err.message);
-                        }
-                    } else {
-                        console.warn('⚠️ Вебхук принят, но в metadata отсутствуют userId или credits');
-                    }
+                // Проверяем платеж через API, не доверяя metadata и IP из входящего запроса.
+                const response = await axios.get(`https://api.yookassa.ru/v3/payments/${encodeURIComponent(paymentId)}`, {
+                    auth: { username: shopId, password: secretKey }, timeout: 20000
+                });
+                const payment = response.data;
+                if (payment?.id !== paymentId || payment.status !== 'succeeded' || payment.paid !== true) {
+                    return res.status(400).send('Payment not confirmed');
                 }
-
-                res.status(200).send('OK');
+                const userId = Number(payment.metadata?.userId);
+                const credits = Number(payment.metadata?.credits);
+                const pkg = Object.values(CREDIT_PACKAGES).find(item => item.credits === credits);
+                if (!Number.isSafeInteger(userId) || userId <= 0 || !pkg ||
+                    payment.amount?.currency !== 'RUB' || Number(payment.amount.value) !== pkg.price) {
+                    return res.status(400).send('Invalid payment data');
+                }
+                // Для защиты после перезапуска paymentId нужно атомарно учитывать в хранилище баланса.
+                const balance = await updateUserBalance(userId, credits);
+                processedPayments.add(paymentId);
+                try {
+                    await bot.telegram.sendMessage(userId,
+                        `🎉 Оплата успешно получена!\n\n➕ Начислено: ${credits} кредитов\n💳 Ваш текущий баланс: ${balance} кредитов`);
+                } catch (error) {
+                    console.error('❌ Ошибка уведомления об оплате:', error.message);
+                }
+                return res.status(200).send('OK');
             } catch (error) {
-                console.error('❌ Ошибка при обработке вебхука ЮKassa:', error.message);
-                res.status(500).send('Internal Server Error');
+                console.error('❌ Ошибка вебхука ЮKassa:', error.message);
+                return res.status(500).send('Internal Server Error');
+            } finally {
+                if (lockAcquired) paymentProcessingLock.delete(paymentId);
             }
         });
-        console.log('🌐 Роут /yookassa-webhook защищен и успешно привязан к Express');
     }
 
-    bot.start(async (ctx) => {
-        if (!userActiveMode.has(ctx.from.id)) {
-            userActiveMode.set(ctx.from.id, 'flash');
-        }
-        const currentMode = userActiveMode.get(ctx.from.id);
+    bot.start(async ctx => {
+        if (!userActiveMode.has(ctx.from.id)) userActiveMode.set(ctx.from.id, 'flash');
+        const mode = userActiveMode.get(ctx.from.id);
         const balance = await getUserBalance(ctx.from.id);
-
-        await ctx.reply(
-            `🤖 *Главное меню бота*\n\n` +
-            `💳 Ваш баланс: *${balance} кредитов*\n` +
-            `🎯 Текущая модель: *${MODEL_NAMES[currentMode]}*\n\n` +
-            `Отправьте текстовый запрос или фото:`,
-            { parse_mode: 'Markdown', ...mainKeyboard }
-        );
+        await ctx.reply(`🤖 Главное меню бота\n\n💳 Ваш баланс: ${balance} кредитов\n🎯 Текущая модель: ${MODEL_NAMES[mode]}\n\nОтправьте текстовый запрос или фото:`, mainKeyboard);
     });
-
-    bot.hears(['💳 Мой баланс', '💳 Баланс'], async (ctx) => {
+    bot.command('cancel', async ctx => {
+        userAwaitingEmail.delete(ctx.from.id);
+        await ctx.reply('Ввод email отменён.', mainKeyboard);
+    });
+    bot.hears(['💳 Мой баланс', '💳 Баланс'], async ctx => {
         const balance = await getUserBalance(ctx.from.id);
-        const currentMode = userActiveMode.get(ctx.from.id) || 'flash';
-        await ctx.reply(
-            `💳 *Баланс:* ${balance} кр.\nМодель: ${MODEL_NAMES[currentMode]}`,
-            {
-                parse_mode: 'Markdown',
-                ...Markup.inlineKeyboard([
-                    [Markup.button.callback('💰 Пополнить баланс', 'action_buy_credits')]
-                ])
-            }
-        );
+        const mode = userActiveMode.get(ctx.from.id) || 'flash';
+        await ctx.reply(`💳 Баланс: ${balance} кр.\nМодель: ${MODEL_NAMES[mode]}`,
+            Markup.inlineKeyboard([[Markup.button.callback('💰 Пополнить баланс', 'action_buy_credits')]]));
     });
-
-    bot.hears(['🤖 Выбрать модель ИИ', '🤖 Модели'], async (ctx) => {
-        const currentMode = userActiveMode.get(ctx.from.id) || 'flash';
-        await ctx.reply(`🤖 *Выберите модель:*`, { parse_mode: 'Markdown', ...getModelSelectionKeyboard(currentMode) });
+    bot.hears(['🤖 Выбрать модель ИИ', '🤖 Модели'], async ctx => {
+        await ctx.reply('🤖 Выберите модель:', getModelSelectionKeyboard(userActiveMode.get(ctx.from.id) || 'flash'));
     });
-
-    bot.hears('💰 Пополнить баланс', async (ctx) => {
-        const keyboard = Object.keys(CREDIT_PACKAGES).map(pkgKey => {
-            const pkg = CREDIT_PACKAGES[pkgKey];
-            return [Markup.button.callback(`💳 ${pkg.title} — ${pkg.price} ₽`, `buy_pkg_${pkgKey}`)];
-        });
-        await ctx.reply(`💳 *Выберите пакет пополнения:*`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(keyboard) });
+    bot.hears('💰 Пополнить баланс', showPackages);
+    bot.hears(['ℹ Справка', 'ℹ️ Справка'], async ctx => {
+        await ctx.reply('ℹ️ Как пользоваться ботом:\n\n1. Выберите модель ИИ.\n2. Напишите запрос или отправьте картинку.\n3. За успешную генерацию списываются кредиты.\n\nПополнение: «💰 Пополнить баланс».\nОтмена ввода email: /cancel.');
     });
-
-    bot.hears(['ℹ Справка', 'ℹ️ Справка'], async (ctx) => {
-        await ctx.reply(
-            `ℹ️ *Как пользоваться ботом:*\n\n` +
-            `1. Выберите нужную модель ИИ в меню.\n` +
-            `2. Напишите любой запрос или отправьте картинку.\n` +
-            `3. За каждый запрос списываются кредиты.\n\n` +
-            `Если кредиты закончились, нажмите кнопку «💰 Пополнить баланс».`,
-            { parse_mode: 'Markdown' }
-        );
-    });
-
-    bot.action('action_choose_ai', async (ctx) => {
+    bot.action('action_choose_ai', async ctx => {
         await ctx.answerCbQuery();
-        const currentMode = userActiveMode.get(ctx.from.id) || 'flash';
-        await ctx.reply(`🤖 *Выберите ИИ-модель:*`, { parse_mode: 'Markdown', ...getModelSelectionKeyboard(currentMode) });
+        await ctx.reply('🤖 Выберите ИИ-модель:', getModelSelectionKeyboard(userActiveMode.get(ctx.from.id) || 'flash'));
     });
-
-    bot.action(/^set_model_(.+)$/, async (ctx) => {
-        const selectedModel = ctx.match[1];
-        if (MODEL_NAMES[selectedModel]) {
-            userActiveMode.set(ctx.from.id, selectedModel);
-            await ctx.answerCbQuery(`Выбрано: ${MODEL_NAMES[selectedModel]}`);
-            await ctx.reply(`✅ Модель изменена на *${MODEL_NAMES[selectedModel]}*`, { parse_mode: 'Markdown' });
-        }
+    bot.action(/^set_model_(.+)$/, async ctx => {
+        const mode = ctx.match[1];
+        if (!Object.prototype.hasOwnProperty.call(MODEL_NAMES, mode)) return ctx.answerCbQuery('Модель не найдена');
+        userActiveMode.set(ctx.from.id, mode);
+        await ctx.answerCbQuery(`Выбрано: ${MODEL_NAMES[mode]}`);
+        await ctx.reply(`✅ Модель изменена на ${MODEL_NAMES[mode]}`);
     });
-
-    const showPackages = async (ctx) => {
-        const keyboard = Object.keys(CREDIT_PACKAGES).map(pkgKey => {
-            const pkg = CREDIT_PACKAGES[pkgKey];
-            return [Markup.button.callback(`💳 ${pkg.title} — ${pkg.price} ₽`, `buy_pkg_${pkgKey}`)];
-        });
-        await ctx.reply(`💳 *Выберите пакет пополнения:*`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(keyboard) });
-    };
-
-    bot.action('action_buy_credits', async (ctx) => {
+    bot.action('action_buy_credits', async ctx => {
         await ctx.answerCbQuery();
         await showPackages(ctx);
     });
-
-    bot.action(/^buy_pkg_(.+)$/, async (ctx) => {
-        const pkgKey = ctx.match[1];
-        const pkg = CREDIT_PACKAGES[pkgKey];
-        if (!pkg) return ctx.answerCbQuery('⚠️ Пакет не найден');
-
+    bot.action(/^buy_pkg_(.+)$/, async ctx => {
+        const key = ctx.match[1];
+        if (!Object.prototype.hasOwnProperty.call(CREDIT_PACKAGES, key)) return ctx.answerCbQuery('⚠️ Пакет не найден');
+        const pkg = CREDIT_PACKAGES[key];
         await ctx.answerCbQuery();
-        userAwaitingEmail.set(ctx.from.id, pkgKey);
-
-        await ctx.reply(
-            `✉️ Вы выбрали: *${pkg.title}* (${pkg.price} ₽).\n\n` +
-            `Пожалуйста, введите ваш *Email* в ответном сообщении. На него будет отправлен электронный чек после оплаты:`,
-            { parse_mode: 'Markdown' }
-        );
+        userAwaitingEmail.set(ctx.from.id, key);
+        await ctx.reply(`✉️ Вы выбрали: ${pkg.title} (${pkg.price} ₽).\n\nВведите email для электронного чека.\nОтмена: /cancel`);
     });
-
     bot.on('text', async (ctx, next) => {
-        const text = ctx.message.text.trim();
         const userId = ctx.from.id;
-
-        if (userAwaitingEmail.has(userId)) {
-            if (['🤖 Выбрать модель ИИ', '💳 Мой баланс', '💰 Пополнить баланс', 'ℹ️ Справка', 'ℹ Справка', '🤖 Модели', '💳 Баланс'].includes(text)) {
-                userAwaitingEmail.delete(userId);
-                return next();
-            }
-
-            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-            if (!emailRegex.test(text)) {
-                return ctx.reply('⚠️ Кажется, это не похоже на email. Пожалуйста, введите корректный адрес электронной почты (например, `example@mail.ru`):', { parse_mode: 'Markdown' });
-            }
-
-            const pkgKey = userAwaitingEmail.get(userId);
-            userAwaitingEmail.delete(userId);
-            const pkg = CREDIT_PACKAGES[pkgKey];
-
-            await ctx.reply(`⏳ Генерирую ссылку на оплату для ${text}...`);
-
-            const paymentUrl = await createYookassaPayment(
-                pkg.price,
-                `Покупка ${pkg.title} в боте`,
-                text,
-                { userId: String(userId), credits: String(pkg.credits) }
-            );
-
-            if (paymentUrl) {
-                return ctx.reply(
-                    `💳 Ссылка на оплату сформирована успешно!\n\n` +
-                    `Электронный чек будет автоматически отправлен на адрес: *${text}*\n\n` +
-                    `Нажмите кнопку ниже для перехода к оплате:`,
-                    {
-                        parse_mode: 'Markdown',
-                        ...Markup.inlineKeyboard([
-                            [Markup.button.url('🔗 Оплатить в ЮKassa', paymentUrl)]
-                        ])
-                    }
-                );
-            } else {
-                return ctx.reply('⚠️ Не удалось сформировать ссылку на оплату. Обратитесь к администратору.');
-            }
+        if (!userAwaitingEmail.has(userId)) return next();
+        const email = ctx.message.text.trim();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            return ctx.reply('⚠️ Введите корректный email, например example@mail.ru. Отмена: /cancel');
         }
-
-        return next();
-    });
-
-    const handleAiRequest = async (ctx) => {
-        const text = ctx.message?.text || '';
-
-        if (['🤖 Выбрать модель ИИ', '💳 Мой баланс', '💰 Пополнить баланс', 'ℹ Справка', 'ℹ️ Справка', '🤖 Модели', '💳 Баланс'].includes(text)) {
-            return;
-        }
-
-        const userId = ctx.from.id;
-
-        if (userProcessingLock.has(userId)) {
-            return ctx.reply('⏳ Нейросеть еще генерирует прошлый ответ. Дождись окончания!');
-        }
-
+        if (userProcessingLock.has(userId)) return ctx.reply('⏳ Дождитесь завершения предыдущей операции.');
         userProcessingLock.add(userId);
-        let waitMessage = null;
-
         try {
-            const currentMode = userActiveMode.get(userId) || 'flash';
-            const cost = MODEL_COSTS[currentMode] || 1;
-
-            const balance = await getUserBalance(userId);
-            if (balance < cost) {
-                return await ctx.reply(
-                    `❌ *Недостаточно кредитов!*\nВаш баланс: ${balance} кр. Требуется: ${cost} кр.`,
-                    {
-                        parse_mode: 'Markdown',
-                        ...Markup.inlineKeyboard([[Markup.button.callback('💰 Пополнить баланс', 'action_buy_credits')]])
-                    }
-                );
-            }
-
-            if (!aiPlugin) return await ctx.reply('⚠️ Плагин ИИ временно недоступен.');
-
-            waitMessage = await ctx.reply(`⏳ *Генерирую ответ...*`, { parse_mode: 'Markdown' });
-
-            let prompt = text || ctx.message?.caption || '';
-            let fileBuffer = null;
-            let mimeType = null;
-
-            if (ctx.message?.photo && ctx.message.photo.length > 0) {
-                const largestPhoto = ctx.message.photo[ctx.message.photo.length - 1];
-                fileBuffer = await getTelegramFileBuffer(ctx, largestPhoto.file_id);
-                mimeType = 'image/jpeg';
-            }
-
-            const aiResult = await aiPlugin.processRequest({
-                prompt, fileBuffer, mimeType, modelKey: currentMode
-            });
-
-            if (!aiResult || (!aiResult.text && !aiResult.buffer)) {
-                throw new Error('ИИ не вернул результат генерации');
-            }
-
-            await deductUserBalance(userId, cost);
-            const remainingBalance = await getUserBalance(userId);
-
-            if (waitMessage) {
-                try { await ctx.deleteMessage(waitMessage.message_id); } catch(e){}
-            }
-
-            const replyText = `${aiResult.text}\n\n───────────────\n💳 *Списано:* ${cost} кр. | *Остаток:* ${remainingBalance} кр.`;
-            const replyPhotoCaption = `${aiResult.text || ''}\n\n💳 Списано: ${cost} кр. | Остаток: ${remainingBalance} кр.`;
-
-            try {
-                if (aiResult.type === 'image' && aiResult.buffer) {
-                    await ctx.replyWithPhoto({ source: aiResult.buffer }, { caption: replyPhotoCaption });
-                } else {
-                    await ctx.reply(replyText, { parse_mode: 'Markdown' });
-                }
-            } catch (markdownError) {
-                console.warn(`⚠️ Ошибка Markdown для пользователя ${userId}, отправляем чистый текст:`, markdownError.message);
-                if (aiResult.type === 'image' && aiResult.buffer) {
-                    await ctx.replyWithPhoto({ source: aiResult.buffer }, { caption: replyPhotoCaption.replace(/[*_`[\]]/g, '') });
-                } else {
-                    await ctx.reply(replyText.replace(/[*_`[\]]/g, ''));
-                }
-            }
-        } catch (error) {
-            console.error('❌ Ошибка генерации:', error);
-            if (waitMessage) {
-                try { await ctx.deleteMessage(waitMessage.message_id); } catch(e){}
-            }
-            await ctx.reply(`⚠️ Произошла ошибка: ${error.message}`);
+            const key = userAwaitingEmail.get(userId);
+            const pkg = CREDIT_PACKAGES[key];
+            await ctx.reply('⏳ Генерирую ссылку на оплату...');
+            const url = await createYookassaPayment(pkg.price, `Покупка ${pkg.title} в боте`, email,
+                { userId: String(userId), credits: String(pkg.credits) });
+            if (!url) return await ctx.reply('⚠️ Не удалось создать ссылку. Повторите ввод email или нажмите /cancel.');
+            await ctx.reply(`💳 Ссылка на оплату сформирована!\n\nEmail для чека: ${email}\n\nНажмите кнопку ниже:`,
+                Markup.inlineKeyboard([[Markup.button.url('🔗 Оплатить в ЮKassa', url)]]));
+            if (userAwaitingEmail.get(userId) === key) userAwaitingEmail.delete(userId);
         } finally {
             userProcessingLock.delete(userId);
         }
-    };
+    });
 
+    const handleAiRequest = async ctx => {
+        const text = ctx.message?.text || '';
+        if (MENU_TEXTS.has(text.trim())) return;
+        if (text.startsWith('/')) return ctx.reply('Неизвестная команда. Используйте /start или /cancel.');
+        const userId = ctx.from.id;
+        if (userAwaitingEmail.has(userId)) return ctx.reply('✉️ Сначала введите email или отмените ввод: /cancel');
+        if (userProcessingLock.has(userId)) return ctx.reply('⏳ Дождитесь завершения предыдущей операции.');
+        userProcessingLock.add(userId);
+        let waitMessage = null;
+        let charged = false;
+        try {
+            const mode = userActiveMode.get(userId) || 'flash';
+            const cost = MODEL_COSTS[mode];
+            const balance = await getUserBalance(userId);
+            if (balance < cost) {
+                return await ctx.reply(`❌ Недостаточно кредитов!\nВаш баланс: ${balance} кр. Требуется: ${cost} кр.`,
+                    Markup.inlineKeyboard([[Markup.button.callback('💰 Пополнить баланс', 'action_buy_credits')]]));
+            }
+            if (!aiPlugin || typeof aiPlugin.processRequest !== 'function') {
+                return await ctx.reply('⚠️ Плагин ИИ временно недоступен.');
+            }
+            waitMessage = await ctx.reply('⏳ Генерирую ответ...');
+            let fileBuffer = null;
+            let mimeType = null;
+            const photos = ctx.message?.photo;
+            if (photos?.length) {
+                fileBuffer = await getTelegramFileBuffer(ctx, photos[photos.length - 1].file_id);
+                mimeType = 'image/jpeg';
+            }
+            const result = validateAiResult(await aiPlugin.processRequest({
+                prompt: text || ctx.message?.caption || '', fileBuffer, mimeType, modelKey: mode
+            }));
+            const remainingBalance = await updateUserBalance(userId, -cost);
+            charged = true;
+            const footer = `💳 Списано: ${cost} кр. | Остаток: ${remainingBalance} кр.`;
+            if (result.type === 'image') {
+                const caption = `${result.text}\n\n${footer}`;
+                if (caption.length <= 1000) {
+                    await ctx.replyWithPhoto({ source: result.buffer }, { caption });
+                } else {
+                    await ctx.replyWithPhoto({ source: result.buffer });
+                    await sendPlainText(ctx, caption);
+                }
+            } else {
+                await sendPlainText(ctx, `${result.text}\n\n───────────────\n${footer}`);
+            }
+        } catch (error) {
+            console.error('❌ Ошибка обработки ИИ-запроса:', error);
+            await ctx.reply(charged
+                ? '⚠️ Результат сгенерирован и кредиты списаны, но отправка не завершилась. Обратитесь к администратору.'
+                : '⚠️ Не удалось завершить запрос. Если баланс изменился, обратитесь к администратору.');
+        } finally {
+            if (waitMessage) {
+                try { await ctx.deleteMessage(waitMessage.message_id); } catch (error) {
+                    console.warn('Не удалось удалить сообщение ожидания:', error.message);
+                }
+            }
+            userProcessingLock.delete(userId);
+        }
+    };
     bot.on('text', handleAiRequest);
     bot.on('photo', handleAiRequest);
 
-    bot.launch().then(() => {
-        console.log('🤖 Ядро бота успешно запущено!');
-    }).catch((err) => {
-        console.error('⚠️ Ошибка при запуске Telegram polling (бот перезапустится автоматически):', err.message);
+    try {
+        await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    } catch (error) {
+        console.warn('⚠️ Не удалось сбросить вебхук:', error.message);
+    }
+    bot.launch().catch(error => {
+        console.error('⚠️ Ошибка запуска Telegram polling:', error.message);
     });
 }
 
