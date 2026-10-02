@@ -165,13 +165,14 @@ async function startBot(app) {
     if (app) {
         app.post('/yookassa-webhook', async (req, res) => {
             try {
-                const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
-                const isYookassaIp = clientIp.includes('185.71.76.') ||
-                                     clientIp.includes('185.71.77.') ||
-                                     clientIp.includes('77.75.153.') ||
-                                     clientIp.includes('77.75.154.') ||
-                                     clientIp.includes('77.75.156.') ||
-                                     clientIp.includes('2a02:5180:');
+                const rawIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
+                const clientIp = rawIp.split(',')[0].trim();
+                const isYookassaIp = clientIp.startsWith('185.71.76.') ||
+                                     clientIp.startsWith('185.71.77.') ||
+                                     clientIp.startsWith('77.75.153.') ||
+                                     clientIp.startsWith('77.75.154.') ||
+                                     clientIp.startsWith('77.75.156.') ||
+                                     clientIp.startsWith('2a02:5180:');
 
                 if (!isYookassaIp) {
                     console.warn(`🚨 Попытка подделки платежа с неавторизованного IP: ${clientIp}`);
@@ -321,6 +322,11 @@ async function startBot(app) {
         const userId = ctx.from.id;
 
         if (userAwaitingEmail.has(userId)) {
+            if (['🤖 Выбрать модель ИИ', '💳 Мой баланс', '💰 Пополнить баланс', 'ℹ️ Справка', 'ℹ Справка', '🤖 Модели', '💳 Баланс'].includes(text)) {
+                userAwaitingEmail.delete(userId);
+                return next();
+            }
+
             const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
             if (!emailRegex.test(text)) {
                 return ctx.reply('⚠️ Кажется, это не похоже на email. Пожалуйста, введите корректный адрес электронной почты (например, `example@mail.ru`):', { parse_mode: 'Markdown' });
@@ -408,6 +414,10 @@ async function startBot(app) {
                 prompt, fileBuffer, mimeType, modelKey: currentMode
             });
 
+            if (!aiResult || (!aiResult.text && !aiResult.buffer)) {
+                throw new Error('ИИ не вернул результат генерации');
+            }
+
             await deductUserBalance(userId, cost);
             const remainingBalance = await getUserBalance(userId);
 
@@ -427,9 +437,9 @@ async function startBot(app) {
             } catch (markdownError) {
                 console.warn(`⚠️ Ошибка Markdown для пользователя ${userId}, отправляем чистый текст:`, markdownError.message);
                 if (aiResult.type === 'image' && aiResult.buffer) {
-                    await ctx.replyWithPhoto({ source: aiResult.buffer }, { caption: replyPhotoCaption.replace(/[*_`[]/g, '') });
+                    await ctx.replyWithPhoto({ source: aiResult.buffer }, { caption: replyPhotoCaption.replace(/[*_`[\]]/g, '') });
                 } else {
-                    await ctx.reply(replyText.replace(/[*_`[]/g, ''));
+                    await ctx.reply(replyText.replace(/[*_`[\]]/g, ''));
                 }
             }
         } catch (error) {
