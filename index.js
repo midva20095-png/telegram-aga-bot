@@ -1,7 +1,13 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
+const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
+
+// Инициализация Express для вебхуков ЮKassa
+const app = express();
+app.use(express.json());
+const PORT = process.env.PORT || 3000;
 
 // Инициализация Supabase
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
@@ -11,14 +17,13 @@ try {
     aiPlugin = require('../ai_plugins/google_gemini_plugin');
     console.log('✅ Плагин Google Gemini успешно подключен к ядру');
 } catch (e) {
-    console.warn('⚠️ Внимание: Плагин ИИ не найден!', e.message);
+    console.warn('⚠️ Внимание: Плагин ИИ не найден (работаем без него):', e.message);
 }
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const userActiveMode = new Map();
 const userAwaitingEmail = new Map();
 
-// Глобальный обработчик ошибок Telegram, чтобы сервер не падал при сбоях сети или 409
 bot.catch((err, ctx) => {
     console.error(`⚠️ Ошибка в Telegraf для ${ctx?.updateType || 'неизвестного события'}:`, err.message);
 });
@@ -56,7 +61,7 @@ const mainKeyboard = Markup.keyboard([
 ]).resize();
 
 // ==========================================
-// ФУНКЦИИ РАБОТЫ С SUPABASE (ВМЕСТО GOOGLE)
+// ФУНКЦИИ РАБОТЫ С SUPABASE
 // ==========================================
 
 async function getUserBalance(userId) {
@@ -68,7 +73,6 @@ async function getUserBalance(userId) {
             .single();
 
         if (error || !data) {
-            // Если пользователя еще нет в таблице — автоматически создаем с балансом 0
             await supabase.from('users').insert([{ user_id: userId, balance: 0 }]);
             return 0;
         }
@@ -117,8 +121,6 @@ async function addUserBalance(userId, amount) {
     }
 }
 
-// ==========================================
-
 async function getTelegramFileBuffer(ctx, fileId) {
     try {
         const fileLink = await ctx.telegram.getFileLink(fileId);
@@ -148,30 +150,19 @@ async function createYookassaPayment(amount, description, email, metadata) {
         }
 
         const response = await axios.post('https://api.yookassa.ru/v3/payments', {
-            amount: {
-                value: amount.toFixed(2),
-                currency: 'RUB'
-            },
-            confirmation: {
-                type: 'redirect',
-                return_url: process.env.YOOKASSA_RETURN_URL || 'https://t.me/'
-            },
+            amount: { value: amount.toFixed(2), currency: 'RUB' },
+            confirmation: { type: 'redirect', return_url: process.env.YOOKASSA_RETURN_URL || 'https://t.me/' },
             capture: true,
             description: description,
             metadata: metadata,
             receipt: {
                 customer: { email: email },
-                items: [
-                    {
-                        description: description,
-                        quantity: '1.00',
-                        amount: {
-                            value: amount.toFixed(2),
-                            currency: 'RUB'
-                        },
-                        vat_code: Number(process.env.YOOKASSA_VAT_CODE || '1')
-                    }
-                ]
+                items: [{
+                    description: description,
+                    quantity: '1.00',
+                    amount: { value: amount.toFixed(2), currency: 'RUB' },
+                    vat_code: Number(process.env.YOOKASSA_VAT_CODE || '1')
+                }]
             }
         }, {
             auth: { username: shopId, password: secretKey },
@@ -185,7 +176,7 @@ async function createYookassaPayment(amount, description, email, metadata) {
     }
 }
 
-async function startBot(app) {
+async function startBot() {
     try {
         await bot.telegram.deleteWebhook({ drop_pending_updates: true });
         console.log('🧹 Старый вебхук сброшен, запущен Long Polling.');
@@ -193,50 +184,44 @@ async function startBot(app) {
         console.log('ℹ️ Вебхук:', e.message);
     }
 
-    if (app) {
-        app.post('/yookassa-webhook', async (req, res) => {
-            try {
-                const event = req.body;
-                console.log('🔔 Получен вебхук от ЮKassa:', JSON.stringify(event));
+    // Регистрация вебхука ЮKassa в Express
+    app.post('/yookassa-webhook', async (req, res) => {
+        try {
+            const event = req.body;
+            console.log('🔔 Получен вебхук от ЮKassa:', JSON.stringify(event));
 
-                if (event.event === 'payment.succeeded') {
-                    const payment = event.object;
-                    const metadata = payment.metadata;
+            if (event.event === 'payment.succeeded') {
+                const payment = event.object;
+                const metadata = payment.metadata;
 
-                    if (metadata && metadata.userId && metadata.credits) {
-                        const userId = parseInt(metadata.userId);
-                        const creditsToAdd = parseInt(metadata.credits);
+                if (metadata && metadata.userId && metadata.credits) {
+                    const userId = parseInt(metadata.userId);
+                    const creditsToAdd = parseInt(metadata.credits);
 
-                        console.log(`🎉 Платёж подтвержден! Начисляем ${creditsToAdd} кредитов пользователю ${userId}`);
+                    console.log(`🎉 Платёж подтвержден! Начисляем ${creditsToAdd} кредитов пользователю ${userId}`);
+                    await addUserBalance(userId, creditsToAdd);
 
-                        await addUserBalance(userId, creditsToAdd);
-
-                        try {
-                            const newBalance = await getUserBalance(userId);
-                            await bot.telegram.sendMessage(
-                                userId,
-                                `🎉 *Оплата успешно получена!*\n\n` +
-                                `➕ Начислено: *${creditsToAdd} кредитов*\n` +
-                                `💳 Ваш текущий баланс: *${newBalance} кредитов*`,
-                                { parse_mode: 'Markdown' }
-                            );
-                            console.log(`✅ Уведомление успешно отправлено пользователю ${userId}`);
-                        } catch (err) {
-                            console.error('❌ Не удалось отправить сообщение в Telegram пользователю:', err.message);
-                        }
-                    } else {
-                        console.warn('⚠️ Вебхук принят, но в metadata отсутствуют userId или credits');
+                    try {
+                        const newBalance = await getUserBalance(userId);
+                        await bot.telegram.sendMessage(
+                            userId,
+                            `🎉 *Оплата успешно получена!*\n\n` +
+                            `➕ Начислено: *${creditsToAdd} кредитов*\n` +
+                            `💳 Ваш текущий баланс: *${newBalance} кредитов*`,
+                            { parse_mode: 'Markdown' }
+                        );
+                        console.log(`✅ Уведомление успешно отправлено пользователю ${userId}`);
+                    } catch (err) {
+                        console.error('❌ Не удалось отправить сообщение в Telegram:', err.message);
                     }
                 }
-
-                res.status(200).send('OK');
-            } catch (error) {
-                console.error('❌ Ошибка при обработке вебхука ЮKassa:', error.message);
-                res.status(500).send('Internal Server Error');
             }
-        });
-        console.log('🌐 Роут /yookassa-webhook успешно привязан к Express');
-    }
+            res.status(200).send('OK');
+        } catch (error) {
+            console.error('❌ Ошибка при обработке вебхука ЮKassa:', error.message);
+            res.status(500).send('Internal Server Error');
+        }
+    });
 
     bot.start(async (ctx) => {
         if (!userActiveMode.has(ctx.from.id)) {
@@ -296,17 +281,13 @@ async function startBot(app) {
         }
     });
 
-    const showPackages = async (ctx) => {
+    bot.action('action_buy_credits', async (ctx) => {
+        await ctx.answerCbQuery();
         const keyboard = Object.keys(CREDIT_PACKAGES).map(pkgKey => {
             const pkg = CREDIT_PACKAGES[pkgKey];
             return [Markup.button.callback(`💳 ${pkg.title} — ${pkg.price} ₽`, `buy_pkg_${pkgKey}`)];
         });
         await ctx.reply(`💳 *Выберите пакет пополнения:*`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(keyboard) });
-    };
-
-    bot.action('action_buy_credits', async (ctx) => {
-        await ctx.answerCbQuery();
-        await showPackages(ctx);
     });
 
     bot.action(/^buy_pkg_(.+)$/, async (ctx) => {
@@ -319,52 +300,9 @@ async function startBot(app) {
 
         await ctx.reply(
             `✉️ Вы выбрали: *${pkg.title}* (${pkg.price} ₽).\n\n` +
-            `Пожалуйста, введите ваш *Email* в ответном сообщении. На него будет отправлен электронный чек после оплаты:`,
+            `Пожалуйста, введите ваш *Email* в ответном сообщении:`,
             { parse_mode: 'Markdown' }
         );
-    });
-
-    bot.on('text', async (ctx, next) => {
-        const text = ctx.message.text.trim();
-        const userId = ctx.from.id;
-
-        if (userAwaitingEmail.has(userId)) {
-            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-            if (!emailRegex.test(text)) {
-                return ctx.reply('⚠️ Кажется, это не похоже на email. Пожалуйста, введите корректный адрес электронной почты (например, `example@mail.ru`):', { parse_mode: 'Markdown' });
-            }
-
-            const pkgKey = userAwaitingEmail.get(userId);
-            userAwaitingEmail.delete(userId);
-            const pkg = CREDIT_PACKAGES[pkgKey];
-
-            await ctx.reply(`⏳ Генерирую ссылку на оплату для ${text}...`);
-
-            const paymentUrl = await createYookassaPayment(
-                pkg.price, 
-                `Покупка ${pkg.title} в боте`, 
-                text, 
-                { userId: String(userId), credits: String(pkg.credits) }
-            );
-
-            if (paymentUrl) {
-                return ctx.reply(
-                    `💳 Ссылка на оплату сформирована успешно!\n\n` +
-                    `Электронный чек будет автоматически отправлен на адрес: *${text}*\n\n` +
-                    `Нажмите кнопку ниже для перехода к оплате:`,
-                    {
-                        parse_mode: 'Markdown',
-                        ...Markup.inlineKeyboard([
-                            [Markup.button.url('🔗 Оплатить в ЮKassa', paymentUrl)]
-                        ])
-                    }
-                );
-            } else {
-                return ctx.reply('⚠️ Не удалось сформировать ссылку на оплату. Обратитесь к администратору.');
-            }
-        }
-
-        return next();
     });
 
     const handleAiRequest = async (ctx) => {
@@ -424,14 +362,60 @@ async function startBot(app) {
         }
     };
 
-    bot.on('text', handleAiRequest);
+    bot.on('text', async (ctx, next) => {
+        const text = ctx.message.text.trim();
+        const userId = ctx.from.id;
+
+        if (userAwaitingEmail.has(userId)) {
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailRegex.test(text)) {
+                return ctx.reply('⚠️ Пожалуйста, введите корректный email (например, `example@mail.ru`):', { parse_mode: 'Markdown' });
+            }
+
+            const pkgKey = userAwaitingEmail.get(userId);
+            userAwaitingEmail.delete(userId);
+            const pkg = CREDIT_PACKAGES[pkgKey];
+
+            await ctx.reply(`⏳ Генерирую ссылку на оплату для ${text}...`);
+
+            const paymentUrl = await createYookassaPayment(
+                pkg.price, 
+                `Покупка ${pkg.title} в боте`, 
+                text, 
+                { userId: String(userId), credits: String(pkg.credits) }
+            );
+
+            if (paymentUrl) {
+                return ctx.reply(
+                    `💳 Ссылка на оплату сформирована!\n\n` +
+                    `Чек придет на: *${text}*`,
+                    {
+                        parse_mode: 'Markdown',
+                        ...Markup.inlineKeyboard([
+                            [Markup.button.url('🔗 Оплатить в ЮKassa', paymentUrl)]
+                        ])
+                    }
+                );
+            } else {
+                return ctx.reply('⚠️ Не удалось сформировать ссылку на оплату.');
+            }
+        }
+
+        return handleAiRequest(ctx);
+    });
+
     bot.on('photo', handleAiRequest);
 
+    // Запуск Express сервера и самого бота
+    app.listen(PORT, () => {
+        console.log(`🌐 Экспресс-сервер запущен на порту ${PORT}`);
+    });
+
     bot.launch().then(() => {
-        console.log('🤖 Ядро бота успешно запущено!');
+        console.log('🤖 Ядро бота успешно запущенно!');
     }).catch((err) => {
-        console.error('⚠️ Ошибка при запуске Telegram polling (бот перезапустится автоматически):', err.message);
+        console.error('⚠️ Ошибка при запуске Telegram polling:', err.message);
     });
 }
 
-module.exports = { startBot };
+startBot();
