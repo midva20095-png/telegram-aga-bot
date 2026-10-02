@@ -15,7 +15,7 @@ const userActiveMode = new Map();
 const userAwaitingEmail = new Map();
 const userProcessingLock = new Set(); // Защита от спама (Race Condition)
 
-// Глобальный обработчик ошибок Telegram, чтобы сервер не падал при сбоях сети или 409
+// Глобальный обработчик ошибок Telegram
 bot.catch((err, ctx) => {
     console.error(`⚠️ Ошибка в Telegraf для ${ctx?.updateType || 'неизвестного события'}:`, err.message);
 });
@@ -42,9 +42,9 @@ const MODEL_NAMES = {
 };
 
 const CREDIT_PACKAGES = {
-    'pack_50': { credits: 50, price: 250, title: '50 кредитов' },   // 50 кр. × 5 руб = 250 ₽
-    'pack_150': { credits: 150, price: 750, title: '150 кредитов' }, // 150 кр. × 5 руб = 750 ₽
-    'pack_500': { credits: 500, price: 2500, title: '500 кредитов' } // 500 кр. × 5 руб = 2500 ₽
+    'pack_50': { credits: 50, price: 250, title: '50 кредитов' },
+    'pack_150': { credits: 150, price: 750, title: '150 кредитов' },
+    'pack_500': { credits: 500, price: 2500, title: '500 кредитов' }
 };
 
 const mainKeyboard = Markup.keyboard([
@@ -159,13 +159,12 @@ async function startBot(app) {
         await bot.telegram.deleteWebhook({ drop_pending_updates: true });
         console.log('🧹 Старый вебхук сброшен, запущен Long Polling.');
     } catch (e) {
-        console.log('ℹ️ Вебхук:', e.message);
+        console.log('ℹ️️ Вебхук:', e.message);
     }
 
     if (app) {
         app.post('/yookassa-webhook', async (req, res) => {
             try {
-                // Проверка IP-адресов ЮKassa для защиты от подделки платежей
                 const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
                 const isYookassaIp = clientIp.includes('185.71.76.') || 
                                      clientIp.includes('185.71.77.') || 
@@ -183,8 +182,7 @@ async function startBot(app) {
                 console.log('🔔 Получен вебхук от ЮKassa:', JSON.stringify(event));
 
                 if (event.event === 'payment.succeeded') {
-                    const payment = event.object;
-                    const metadata = payment.metadata;
+                    const metadata = event.object?.metadata;
 
                     if (metadata && metadata.userId && metadata.credits) {
                         const userId = parseInt(metadata.userId);
@@ -208,7 +206,7 @@ async function startBot(app) {
                             console.error('❌ Не удалось отправить сообщение в Telegram пользователю:', err.message);
                         }
                     } else {
-                        console.warn('⚠️️ Вебхук принят, но в metadata отсутствуют userId или credits');
+                        console.warn('⚠️ Вебхук принят, но в metadata отсутствуют userId или credits');
                     }
                 }
 
@@ -370,12 +368,12 @@ async function startBot(app) {
 
         const userId = ctx.from.id;
 
-        // Защита от параллельных запросов (спама)
         if (userProcessingLock.has(userId)) {
             return ctx.reply('⏳ Нейросеть еще генерирует прошлый ответ. Дождись окончания!');
         }
 
         userProcessingLock.add(userId);
+        let waitMessage = null;
 
         try {
             const currentMode = userActiveMode.get(userId) || 'flash';
@@ -394,7 +392,7 @@ async function startBot(app) {
 
             if (!aiPlugin) return await ctx.reply('⚠️ Плагин ИИ временно недоступен.');
 
-            const waitMessage = await ctx.reply(`⏳ *Генерирую ответ...*`, { parse_mode: 'Markdown' });
+            waitMessage = await ctx.reply(`⏳ *Генерирую ответ...*`, { parse_mode: 'Markdown' });
 
             let prompt = text || ctx.message?.caption || '';
             let fileBuffer = null;
@@ -413,12 +411,13 @@ async function startBot(app) {
             await deductUserBalance(userId, cost);
             const remainingBalance = await getUserBalance(userId);
 
-            try { await ctx.deleteMessage(waitMessage.message_id); } catch(e){}
+            if (waitMessage) {
+                try { await ctx.deleteMessage(waitMessage.message_id); } catch(e){}
+            }
 
             const replyText = `${aiResult.text}\n\n───────────────\n💳 *Списано:* ${cost} кр. | *Остаток:* ${remainingBalance} кр.`;
             const replyPhotoCaption = `${aiResult.text || ''}\n\n💳 Списано: ${cost} кр. | Остаток: ${remainingBalance} кр.`;
 
-            // Безопасная отправка ответа (с защитой от ошибок парсинга Markdown)
             try {
                 if (aiResult.type === 'image' && aiResult.buffer) {
                     await ctx.replyWithPhoto({ source: aiResult.buffer }, { caption: replyPhotoCaption });
@@ -435,6 +434,9 @@ async function startBot(app) {
             }
         } catch (error) {
             console.error('❌ Ошибка генерации:', error);
+            if (waitMessage) {
+                try { await ctx.deleteMessage(waitMessage.message_id); } catch(e){}
+            }
             await ctx.reply(`⚠️ Произошла ошибка: ${error.message}`);
         } finally {
             userProcessingLock.delete(userId);
