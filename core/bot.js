@@ -77,7 +77,7 @@ async function getUserBalance(userId) {
     try {
         const response = await axios.get(`${process.env.GOOGLE_SCRIPT_URL}`, {
             params: { action: 'get', userId },
-            timeout: 15000
+            timeout: 30000 // Увеличен таймаут до 30 секунд для холодного старта Google Script
         });
         return parseBalance(response.data);
     } catch (error) {
@@ -90,7 +90,7 @@ async function updateUserBalance(userId, amount) {
     try {
         const response = await axios.post(process.env.GOOGLE_SCRIPT_URL, {
             action: 'update', userId, amount
-        }, { timeout: 15000 });
+        }, { timeout: 30000 });
         return parseBalance(response.data);
     } catch (error) {
         console.error("❌ Ошибка обновления баланса:", error.message);
@@ -203,74 +203,7 @@ async function startBot(app) {
     if (handlersRegistered) return;
     handlersRegistered = true;
 
-    try {
-        await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-        console.log('🧹 Старый вебхук сброшен, запущен Long Polling.');
-    } catch (e) {
-        console.log('ℹ️ Вебхук:', e.message);
-    }
-
-    if (app) {
-        app.post('/yookassa-webhook', async (req, res) => {
-            let paymentId = null;
-            let lockAcquired = false;
-            try {
-                const event = req.body;
-                if (event?.event !== 'payment.succeeded') return res.status(200).send('OK');
-
-                paymentId = event.object?.id;
-                if (!paymentId || processedPayments.has(paymentId)) return res.status(200).send('OK');
-                if (paymentProcessingLock.has(paymentId)) return res.status(503).send('Retry later');
-
-                paymentProcessingLock.add(paymentId);
-                lockAcquired = true;
-
-                const shopId = process.env.YOOKASSA_SHOP_ID;
-                const secretKey = process.env.YOOKASSA_SECRET_KEY;
-                if (!shopId || !secretKey) return res.status(503).send('Unavailable');
-
-                const response = await axios.get(`https://api.yookassa.ru/v3/payments/${encodeURIComponent(paymentId)}`, {
-                    auth: { username: shopId, password: secretKey }, timeout: 15000
-                });
-
-                const payment = response.data;
-                if (payment?.status !== 'succeeded' || payment.paid !== true) {
-                    return res.status(400).send('Not confirmed');
-                }
-
-                const userId = Number(payment.metadata?.userId);
-                const creditsToAdd = Number(payment.metadata?.credits);
-
-                if (!Number.isSafeInteger(userId) || !Number.isSafeInteger(creditsToAdd)) {
-                    return res.status(400).send('Invalid metadata');
-                }
-
-                const newBalance = await updateUserBalance(userId, creditsToAdd);
-                processedPayments.add(paymentId);
-
-                try {
-                    await bot.telegram.sendMessage(
-                        userId,
-                        `🎉 *Оплата успешно получена!*\n\n` +
-                        `➕ Начислено: *${creditsToAdd} кредитов*\n` +
-                        `💳 Ваш текущий баланс: *${newBalance} кредитов*`,
-                        { parse_mode: 'Markdown' }
-                    );
-                } catch (err) {
-                    console.error('❌ Не удалось отправить сообщение в Telegram:', err.message);
-                }
-
-                return res.status(200).send('OK');
-            } catch (error) {
-                console.error('❌ Ошибка вебхука ЮKassa:', error.message);
-                return res.status(500).send('Internal Server Error');
-            } finally {
-                if (lockAcquired && paymentId) paymentProcessingLock.delete(paymentId);
-            }
-        });
-        console.log('🌐 Роут /yookassa-webhook успешно привязан к Express');
-    }
-
+    // Регистрация хэндлеров бота
     bot.start(async (ctx) => {
         if (!userActiveMode.has(ctx.from.id)) {
             userActiveMode.set(ctx.from.id, 'flash');
@@ -491,11 +424,92 @@ async function startBot(app) {
     bot.on('text', handleAiRequest);
     bot.on('photo', handleAiRequest);
 
-    bot.launch().then(() => {
-        console.log('🤖 Ядро бота успешно запущено!');
-    }).catch((err) => {
-        console.error('⚠️️ Ошибка при запуске Telegram polling:', err.message);
-    });
+    if (app) {
+        // Использование Webhook вместо Long Polling (решает проблему 409 Conflict на Render)
+        const webhookPath = `/telegram-webhook/${process.env.BOT_TOKEN}`;
+        app.use(bot.webhookCallback(webhookPath));
+
+        const externalUrl = process.env.RENDER_EXTERNAL_URL || 'https://telegram-aga-bot.onrender.com';
+        const fullWebhookUrl = `${externalUrl}${webhookPath}`;
+
+        try {
+            await bot.telegram.setWebhook(fullWebhookUrl);
+            console.log(`🌐 Telegram вебхук успешно установлен на ${fullWebhookUrl}`);
+        } catch (err) {
+            console.error('❌ Ошибка установки вебхука:', err.message);
+        }
+    } else {
+        // Fallback на polling, если Express не передан
+        try {
+            await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+            await bot.launch();
+            console.log('🤖 Ядро бота запущено через Long Polling!');
+        } catch (err) {
+            console.error('⚠️ Ошибка запуска polling:', err.message);
+        }
+    }
+
+    // Настройка роута ЮKassa
+    if (app) {
+        app.post('/yookassa-webhook', async (req, res) => {
+            let paymentId = null;
+            let lockAcquired = false;
+            try {
+                const event = req.body;
+                if (event?.event !== 'payment.succeeded') return res.status(200).send('OK');
+
+                paymentId = event.object?.id;
+                if (!paymentId || processedPayments.has(paymentId)) return res.status(200).send('OK');
+                if (paymentProcessingLock.has(paymentId)) return res.status(503).send('Retry later');
+
+                paymentProcessingLock.add(paymentId);
+                lockAcquired = true;
+
+                const shopId = process.env.YOOKASSA_SHOP_ID;
+                const secretKey = process.env.YOOKASSA_SECRET_KEY;
+                if (!shopId || !secretKey) return res.status(503).send('Unavailable');
+
+                const response = await axios.get(`https://api.yookassa.ru/v3/payments/${encodeURIComponent(paymentId)}`, {
+                    auth: { username: shopId, password: secretKey }, timeout: 15000
+                });
+
+                const payment = response.data;
+                if (payment?.status !== 'succeeded' || payment.paid !== true) {
+                    return res.status(400).send('Not confirmed');
+                }
+
+                const userId = Number(payment.metadata?.userId);
+                const creditsToAdd = Number(payment.metadata?.credits);
+
+                if (!Number.isSafeInteger(userId) || !Number.isSafeInteger(creditsToAdd)) {
+                    return res.status(400).send('Invalid metadata');
+                }
+
+                const newBalance = await updateUserBalance(userId, creditsToAdd);
+                processedPayments.add(paymentId);
+
+                try {
+                    await bot.telegram.sendMessage(
+                        userId,
+                        `🎉 *Оплата успешно получена!*\n\n` +
+                        `➕ Начислено: *${creditsToAdd} кредитов*\n` +
+                        `💳 Ваш текущий баланс: *${newBalance} кредитов*`,
+                        { parse_mode: 'Markdown' }
+                    );
+                } catch (err) {
+                    console.error('❌ Не удалось отправить сообщение в Telegram:', err.message);
+                }
+
+                return res.status(200).send('OK');
+            } catch (error) {
+                console.error('❌ Ошибка вебхука ЮKassa:', error.message);
+                return res.status(500).send('Internal Server Error');
+            } finally {
+                if (lockAcquired && paymentId) paymentProcessingLock.delete(paymentId);
+            }
+        });
+        console.log('🌐 Роут /yookassa-webhook успешно привязан к Express');
+    }
 }
 
 module.exports = { startBot };
