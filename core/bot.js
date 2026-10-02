@@ -250,7 +250,6 @@ async function startBot(app) {
         await ctx.reply(`💳 *Выберите пакет пополнения:*`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(keyboard) });
     });
     
-    // Добавлен обработчик для кнопки "Справка"
     bot.hears('ℹ️ Справка', async (ctx) => {
         await ctx.reply(
             `ℹ️ *Как пользоваться ботом:*\n\n` +
@@ -350,7 +349,7 @@ async function startBot(app) {
 
     const handleAiRequest = async (ctx) => {
         const text = ctx.message?.text || '';
-        // Эмодзи "Справка" здесь теперь идеально совпадает с клавиатурой
+        
         if (['🤖 Выбрать модель ИИ', '💳 Мой баланс', '💰 Пополнить баланс', 'ℹ️ Справка', '🤖 Модели', '💳 Баланс'].includes(text)) {
             return;
         }
@@ -413,9 +412,9 @@ async function startBot(app) {
     bot.launch().then(() => {
         console.log('🤖 Ядро бота успешно запущено!');
     }).catch((err) => {
-        console.error('⚠️ Ошибка при запуске Telegram polling:', err.message);
+        console.error('⚠️ Ошибка при запуске Telegram polling (бот перезапустится автоматически):', err.message);
     });
 }
 
-// Исправлен экспорт модуля
-module.exports = startBot;
+// ИСПРАВЛЕННАЯ СТРОКА
+module.exports = { startBot };
