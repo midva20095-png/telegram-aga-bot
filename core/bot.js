@@ -250,6 +250,18 @@ async function startBot(app) {
         await ctx.reply(`💳 *Выберите пакет пополнения:*`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(keyboard) });
     });
 
+    // ДОБАВЛЕНО: Обработчик для кнопки "Справка"
+    bot.hears(['ℹ Справка', 'ℹ️ Справка'], async (ctx) => {
+        await ctx.reply(
+            `ℹ️ *Как пользоваться ботом:*\n\n` +
+            `1. Выберите нужную модель ИИ в меню.\n` +
+            `2. Напишите любой запрос или отправьте картинку.\n` +
+            `3. За каждый запрос списываются кредиты.\n\n` +
+            `Если кредиты закончились, нажмите кнопку «💰 Пополнить баланс».`,
+            { parse_mode: 'Markdown' }
+        );
+    });
+
     bot.action('action_choose_ai', async (ctx) => {
         await ctx.answerCbQuery();
         const currentMode = userActiveMode.get(ctx.from.id) || 'flash';
@@ -338,7 +350,9 @@ async function startBot(app) {
 
     const handleAiRequest = async (ctx) => {
         const text = ctx.message?.text || '';
-        if (['🤖 Выбрать модель ИИ', '💳 Мой баланс', '💰 Пополнить баланс', 'ℹ️ Справка', '🤖 Модели', '💳 Баланс'].includes(text)) {
+        
+        // ИСПРАВЛЕНО: Добавлены оба варианта кнопки "Справка", чтобы бот её игнорировал
+        if (['🤖 Выбрать модель ИИ', '💳 Мой баланс', '💰 Пополнить баланс', 'ℹ Справка', 'ℹ️ Справка', '🤖 Модели', '💳 Баланс'].includes(text)) {
             return;
         }
 
@@ -404,4 +418,5 @@ async function startBot(app) {
     });
 }
 
-module.exports = { startBot };
+// ИСПРАВЛЕНО: Вернули правильный экспорт, чтобы Node.js не выдавал ошибку "startBot is not a function"
+module.exports = startBot;
