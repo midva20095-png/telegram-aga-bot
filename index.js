@@ -14,10 +14,10 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANO
 
 let aiPlugin = null;
 try {
-    aiPlugin = require('../ai_plugins/google_gemini_plugin');
+    aiPlugin = require('./ai_plugins/google_gemini_plugin');
     console.log('✅ Плагин Google Gemini успешно подключен к ядру');
 } catch (e) {
-    console.warn('⚠️ Внимание: Плагин ИИ не найден (работаем без него):', e.message);
+    console.warn('⚠️️ Внимание: Плагин ИИ не найден (работаем без него):', e.message);
 }
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -60,10 +60,6 @@ const mainKeyboard = Markup.keyboard([
     ['💰 Пополнить баланс', 'ℹ Справка']
 ]).resize();
 
-// ==========================================
-// ФУНКЦИИ РАБОТЫ С SUPABASE
-// ==========================================
-
 async function getUserBalance(userId) {
     try {
         const { data, error } = await supabase
@@ -103,7 +99,6 @@ async function deductUserBalance(userId, cost) {
 
 async function addUserBalance(userId, amount) {
     try {
-        console.log(`➕ Запрос на пополнение баланса в Supabase: userId=${userId}, amount=+${amount}`);
         const currentBalance = await getUserBalance(userId);
         const newBalance = currentBalance + amount;
 
@@ -113,7 +108,6 @@ async function addUserBalance(userId, amount) {
             .eq('user_id', userId);
 
         if (error) throw error;
-        console.log(`📥 Баланс успешно обновлен в Supabase. Новый баланс: ${newBalance}`);
         return true;
     } catch (error) {
         console.error("❌ Ошибка начисления в Supabase:", error.message);
@@ -145,7 +139,6 @@ async function createYookassaPayment(amount, description, email, metadata) {
         const secretKey = process.env.YOOKASSA_SECRET_KEY;
 
         if (!shopId || !secretKey) {
-            console.warn('⚠️ ЮKassa API ключи не настроены. Используется статический URL.');
             return process.env.YOOKASSA_PAYMENT_URL || null;
         }
 
@@ -171,7 +164,7 @@ async function createYookassaPayment(amount, description, email, metadata) {
 
         return response.data.confirmation.confirmation_url;
     } catch (error) {
-        console.error('❌ Ошибка создания платежа в ЮKassa API:', error.response?.data || error.message);
+        console.error('❌ Ошибка ЮKassa API:', error.response?.data || error.message);
         return null;
     }
 }
@@ -184,12 +177,9 @@ async function startBot() {
         console.log('ℹ️ Вебхук:', e.message);
     }
 
-    // Регистрация вебхука ЮKassa в Express
     app.post('/yookassa-webhook', async (req, res) => {
         try {
             const event = req.body;
-            console.log('🔔 Получен вебхук от ЮKassa:', JSON.stringify(event));
-
             if (event.event === 'payment.succeeded') {
                 const payment = event.object;
                 const metadata = payment.metadata;
@@ -198,27 +188,20 @@ async function startBot() {
                     const userId = parseInt(metadata.userId);
                     const creditsToAdd = parseInt(metadata.credits);
 
-                    console.log(`🎉 Платёж подтвержден! Начисляем ${creditsToAdd} кредитов пользователю ${userId}`);
                     await addUserBalance(userId, creditsToAdd);
-
-                    try {
-                        const newBalance = await getUserBalance(userId);
-                        await bot.telegram.sendMessage(
-                            userId,
-                            `🎉 *Оплата успешно получена!*\n\n` +
-                            `➕ Начислено: *${creditsToAdd} кредитов*\n` +
-                            `💳 Ваш текущий баланс: *${newBalance} кредитов*`,
-                            { parse_mode: 'Markdown' }
-                        );
-                        console.log(`✅ Уведомление успешно отправлено пользователю ${userId}`);
-                    } catch (err) {
-                        console.error('❌ Не удалось отправить сообщение в Telegram:', err.message);
-                    }
+                    const newBalance = await getUserBalance(userId);
+                    await bot.telegram.sendMessage(
+                        userId,
+                        `🎉 *Оплата успешно получена!*\n\n` +
+                        `➕ Начислено: *${creditsToAdd} кредитов*\n` +
+                        `💳 Ваш текущий баланс: *${newBalance} кредитов*`,
+                        { parse_mode: 'Markdown' }
+                    );
                 }
             }
             res.status(200).send('OK');
         } catch (error) {
-            console.error('❌ Ошибка при обработке вебхука ЮKassa:', error.message);
+            console.error('❌ Ошибка вебхука ЮKassa:', error.message);
             res.status(500).send('Internal Server Error');
         }
     });
@@ -406,15 +389,14 @@ async function startBot() {
 
     bot.on('photo', handleAiRequest);
 
-    // Запуск Express сервера и самого бота
     app.listen(PORT, () => {
         console.log(`🌐 Экспресс-сервер запущен на порту ${PORT}`);
     });
 
     bot.launch().then(() => {
-        console.log('🤖 Ядро бота успешно запущенно!');
+        console.log('🤖 Ядро бота успешно запущено!');
     }).catch((err) => {
-        console.error('⚠️ Ошибка при запуске Telegram polling:', err.message);
+        console.error('⚠️️ Ошибка при запуске Telegram polling:', err.message);
     });
 }
 
